@@ -1,0 +1,15 @@
+# Executaveis (nao versionar)
+teste_dsu
+sequencial
+paralelo
+
+# Objetos
+*.o
+
+# Logs por rank e saidas geradas
+log_rank*.txt
+mst_sequencial.txt
+mst_paralelo.txt
+
+# Dados de entrada (grandes; nao versionar)
+dados_entrada_sequencial.txt
