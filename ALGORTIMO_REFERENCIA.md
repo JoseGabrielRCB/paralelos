@@ -107,6 +107,19 @@ Fim
   as arestas; a combinação dos mínimos por componente usa `MPI_Allreduce` + `MPI_Op` customizada
   (mesmo desempate determinístico). Leitura/distribuição via **MPI-IO**.
 
+- **D4 (compactação de arestas — só no sequencial em streaming, preservador de comportamento):**
+  o pseudocódigo literal itera sobre o conjunto **E original** a cada fase e descarta na hora as
+  arestas `uv` com `raiz(u) == raiz(v)` (o `continue`). No modo streaming (para `graph.bin`, que
+  não cabe na RAM), em vez de **reler do disco** essas arestas mortas em toda fase, cada fase grava
+  num arquivo de rascunho apenas as arestas **sobreviventes** (as que ainda cruzam componentes
+  diferentes); a fase seguinte lê esse arquivo menor, e quando as sobreviventes cabem na RAM as
+  fases finais rodam em memória. O conjunto de arestas **consideradas para seleção** em cada fase
+  é idêntico ao da versão que relê tudo, logo a **MST/soma resultante é idêntica** (validado).
+  A lógica de Borůvka (menor aresta por componente, desempate, uniões, parada) **não muda** — é a
+  forma canônica de Borůvka com contração do grafo a cada rodada. Reduz I/O e CPU em ~uma ordem de
+  grandeza (o nº de arestas escaneadas cai de ~`E*fases` para ~`E` + sobreviventes, que encolhem
+  rápido). Ativado automaticamente para `.bin` > 2 GB (ou com `--stream`).
+
 ---
 
 ## Formato dos dados de entrada (verificado)

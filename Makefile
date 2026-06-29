@@ -12,7 +12,7 @@
 
 CC      := gcc
 MPICC   := mpicc
-CFLAGS  := -O2 -Wall
+CFLAGS  := -Wall
 COMMON  := grafo.c
 
 .PHONY: all teste sequencial paralelo clean

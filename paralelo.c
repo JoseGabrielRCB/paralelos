@@ -58,6 +58,8 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <stddef.h>   /* offsetof */
+#include <string.h>
+#include <ctype.h>
 
 /* Estrutura reduzida que trafega no Allreduce: a "melhor aresta" de um componente.
  *
@@ -67,12 +69,13 @@
  * entradas de teste desconhecidas podem conter peso == UINT32_MAX — um sentinela
  * de peso confundiria essa aresta com "Nenhuma". Com 'valido' não há ambiguidade.
  *
- * Layout (atenção a padding): 'valido' (uint8) + 3x uint32. O tipo MPI é montado
- * com offsetof de cada campo e MPI_Type_create_resized para fixar a extensão em
- * sizeof(ArestaMin), garantindo o avanço correto entre elementos do vetor. */
+ * Layout (atenção a padding): 'valido' (uint8) + 'peso' (double) + 2x uint32.
+ * O double força alinhamento de 8 bytes, logo há padding após 'valido'. O tipo
+ * MPI é montado com offsetof de cada campo e MPI_Type_create_resized para fixar
+ * a extensão em sizeof(ArestaMin), garantindo o avanço correto entre elementos. */
 typedef struct {
     uint8_t  valido; /* 0 = "Nenhuma" (sem aresta de saída); 1 = aresta válida */
-    uint32_t peso;
+    double   peso;   /* D2 — peso em ponto flutuante (como em graph.bin) */
     uint32_t u;
     uint32_t v;
 } ArestaMin;
@@ -87,6 +90,19 @@ typedef struct {
  * inválida (valido==0, "Nenhuma") nunca é preferida; e qualquer aresta válida
  * é preferida sobre uma inválida.
  * ------------------------------------------------------------------------- */
+/* Verdadeiro se 'nome' termina em 'suf' (case-insensitive): escolhe o leitor
+ * (".bin" => binário/graph.bin; caso contrário => texto via MPI-IO de linhas). */
+static int tem_sufixo(const char *nome, const char *suf)
+{
+    size_t ln = strlen(nome), ls = strlen(suf);
+    if (ln < ls) return 0;
+    const char *p = nome + (ln - ls);
+    for (size_t i = 0; i < ls; i++)
+        if (tolower((unsigned char) p[i]) != tolower((unsigned char) suf[i]))
+            return 0;
+    return 1;
+}
+
 static inline int aresta_preferida(const ArestaMin *x, const ArestaMin *y)
 {
     if (!x->valido) return 0; /* x é "Nenhuma": nunca preferida */
@@ -136,7 +152,7 @@ static void escrever_saida_rank0(const char *saida, const Aresta *mst,
         return;
     }
     for (uint64_t i = 0; i < mst_n; i++)
-        fprintf(fo, "%" PRIu32 " → (%" PRIu32 ") → %" PRIu32 "\n",
+        fprintf(fo, "%" PRIu32 " → (%.10g) → %" PRIu32 "\n",
                 mst[i].u, mst[i].peso, mst[i].v);
     fclose(fo);
 }
@@ -173,8 +189,12 @@ int main(int argc, char **argv)
      * ===================================================================== */
     uint32_t V = 0;
     uint64_t E_total = 0, E_local = 0, byte_ini = 0, byte_fim = 0;
-    Aresta *loc = ler_grafo_mpiio(entrada, &V, &E_total, rank, size,
-                                  &E_local, &byte_ini, &byte_fim);
+    int binario = tem_sufixo(entrada, ".bin");
+    Aresta *loc = binario
+        ? ler_grafo_binario_mpiio(entrada, &V, &E_total, rank, size,
+                                  &E_local, &byte_ini, &byte_fim)
+        : ler_grafo_mpiio(entrada, &V, &E_total, rank, size,
+                          &E_local, &byte_ini, &byte_fim);
     if (loc == NULL || V == 0) {
         if (rank == 0)
             fprintf(stderr, "Erro: falha na leitura MPI-IO.\n");
@@ -217,12 +237,14 @@ int main(int argc, char **argv)
     if (best == NULL || mst == NULL) {
         if (rank == 0) fprintf(stderr, "Erro: sem memoria (best/mst).\n");
         free(best); free(mst); free(loc); dsu_free(&dsu);
-        if (logf) fclose(logf); MPI_Finalize(); return 1;
+        if (logf) fclose(logf);
+        MPI_Finalize();
+        return 1;
     }
     uint64_t mst_n = 0;
-    uint64_t soma  = 0; /* D2 */
+    double   soma  = 0.0; /* D2: soma em ponto flutuante */
 
-    /* Tipo MPI para ArestaMin (uint8 valido + 3x uint32) via offsetof.
+    /* Tipo MPI para ArestaMin (uint8 valido + double peso + 2x uint32) via offsetof.
      * MPI_Type_create_resized fixa a extensão em sizeof(ArestaMin) para que o
      * Allreduce avance corretamente entre elementos do vetor, mesmo com padding. */
     MPI_Datatype TIPO_ARESTA_MIN;
@@ -232,7 +254,7 @@ int main(int argc, char **argv)
                                  offsetof(ArestaMin, peso),
                                  offsetof(ArestaMin, u),
                                  offsetof(ArestaMin, v)};
-        MPI_Datatype tipos[4] = {MPI_UINT8_T, MPI_UINT32_T, MPI_UINT32_T, MPI_UINT32_T};
+        MPI_Datatype tipos[4] = {MPI_UINT8_T, MPI_DOUBLE, MPI_UINT32_T, MPI_UINT32_T};
         MPI_Datatype tmp;
         MPI_Type_create_struct(4, blk, disp, tipos, &tmp);
         MPI_Type_create_resized(tmp, 0, (MPI_Aint) sizeof(ArestaMin), &TIPO_ARESTA_MIN);
@@ -294,7 +316,7 @@ int main(int argc, char **argv)
                 mst[mst_n].v = v;
                 mst[mst_n].peso = best[c].peso;
                 mst_n++;
-                soma += (uint64_t) best[c].peso; /* D2 */
+                soma += best[c].peso; /* D2 */
                 fusoes++;
             }
         }
@@ -350,8 +372,8 @@ int main(int argc, char **argv)
      * C) SAÍDA — apenas o rank 0.
      * ===================================================================== */
     if (rank == 0) {
-        /* 1) stdout: peso total. */
-        printf("Peso total da MST: %" PRIu64 "\n", soma);
+        /* 1) stdout: peso total (ponto flutuante). */
+        printf("Peso total da MST: %.10g\n", soma);
 
         /* 2) arquivo: MST como lista de arestas (podem ser milhões -> não no stdout). */
         escrever_saida_rank0(saida, mst, mst_n);

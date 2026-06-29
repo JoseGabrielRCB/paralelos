@@ -13,3 +13,16 @@ mst_paralelo.txt
 
 # Dados de entrada (grandes; nao versionar)
 dados_entrada_sequencial.txt
+
+# Arquivos binarios de grafo e rascunhos de streaming (grandes; nao versionar)
+*.bin
+mst_seq_surv*.bin
+
+# Saidas e logs gerados em execucao
+mst_resultado.txt
+saida.log
+output.txt
+
+# Pacotes/artefatos de setup
+*.tar.gz
+caracteristicas_setup_cod_paralelo

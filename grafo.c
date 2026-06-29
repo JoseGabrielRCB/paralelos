@@ -1,13 +1,16 @@
 /*
- * grafo.c — Implementação do DSU (Union-Find) e stubs de I/O.
- *
- * FASE 0: somente o DSU está funcional. As funções de I/O são stubs.
+ * grafo.c — Implementação do DSU (Union-Find) e do I/O (texto e binário).
  */
+/* Para fseeko/ftello e off_t de 64 bits (arquivos > 2 GB, ex.: graph.bin). */
+#define _FILE_OFFSET_BITS 64
+#define _POSIX_C_SOURCE 200112L
+
 #include "grafo.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <inttypes.h>
+#include <sys/types.h>
 
 /* ------------------------------------------------------------------------- *
  * DSU
@@ -152,8 +155,9 @@ Aresta *ler_grafo_texto(const char *caminho, uint32_t *V, uint64_t *E)
     uint64_t lidas = 0;
     uint64_t ignoradas = 0;
     while (lidas < E_cab && fgets(linha, sizeof linha, f) != NULL) {
-        uint32_t u, v, peso;
-        if (sscanf(linha, "%" SCNu32 " %" SCNu32 " %" SCNu32, &u, &v, &peso) != 3) {
+        uint32_t u, v;
+        double peso; /* D2: peso em ponto flutuante */
+        if (sscanf(linha, "%" SCNu32 " %" SCNu32 " %lf", &u, &v, &peso) != 3) {
             ignoradas++; /* linha em branco ou mal-formada */
             continue;
         }
@@ -178,6 +182,128 @@ Aresta *ler_grafo_texto(const char *caminho, uint32_t *V, uint64_t *E)
 
     *E = lidas; /* número de arestas efetivamente carregadas */
     return arestas;
+}
+
+/* ------------------------------------------------------------------------- *
+ * ler_grafo_binario — leitor BINÁRIO sequencial do formato de `graph.bin`.
+ *
+ * Cada registro tem 16 bytes (u uint32, v uint32, peso double), exatamente o
+ * layout de struct Aresta, então a leitura é uma cópia direta para o vetor.
+ * Não há cabeçalho: E = tamanho/16 e V = (maior índice de vértice) + 1.
+ * ------------------------------------------------------------------------- */
+Aresta *ler_grafo_binario(const char *caminho, uint32_t *V, uint64_t *E)
+{
+    FILE *f = fopen(caminho, "rb");
+    if (f == NULL) {
+        fprintf(stderr, "ler_grafo_binario: nao foi possivel abrir '%s'.\n", caminho);
+        return NULL;
+    }
+
+    /* Tamanho do arquivo (fseek/ftello para suportar > 2 GB). */
+    if (fseeko(f, 0, SEEK_END) != 0) {
+        fprintf(stderr, "ler_grafo_binario: fseeko falhou.\n");
+        fclose(f);
+        return NULL;
+    }
+    off_t fsize = ftello(f);
+    rewind(f);
+    if (fsize < 0 || (uint64_t) fsize % sizeof(Aresta) != 0) {
+        fprintf(stderr, "ler_grafo_binario: tamanho (%lld) nao e multiplo de %zu.\n",
+                (long long) fsize, sizeof(Aresta));
+        fclose(f);
+        return NULL;
+    }
+    uint64_t n = (uint64_t) fsize / sizeof(Aresta);
+
+    Aresta *arestas = (Aresta *) malloc((size_t) n * sizeof(Aresta));
+    if (arestas == NULL) {
+        fprintf(stderr, "ler_grafo_binario: falha ao alocar %" PRIu64 " arestas (%.1f GB).\n",
+                n, (double) n * sizeof(Aresta) / 1e9);
+        fclose(f);
+        return NULL;
+    }
+
+    /* Leitura em blocos (fread de >2 GB de uma vez pode falhar em algumas libc). */
+    const uint64_t BLOCO = 16ULL * 1024 * 1024; /* 16M arestas por bloco */
+    uint64_t lidas = 0;
+    while (lidas < n) {
+        uint64_t querer = (n - lidas < BLOCO) ? (n - lidas) : BLOCO;
+        size_t got = fread(arestas + lidas, sizeof(Aresta), (size_t) querer, f);
+        if (got == 0) break;
+        lidas += got;
+    }
+    fclose(f);
+
+    if (lidas != n) {
+        fprintf(stderr, "ler_grafo_binario: AVISO — lidas %" PRIu64 " de %" PRIu64 " arestas.\n",
+                lidas, n);
+        n = lidas;
+    }
+
+    /* V = maior índice de vértice + 1 (não há cabeçalho). */
+    uint32_t vmax = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        if (arestas[i].u > vmax) vmax = arestas[i].u;
+        if (arestas[i].v > vmax) vmax = arestas[i].v;
+    }
+
+    *V = (n > 0) ? (vmax + 1) : 0;
+    *E = n;
+    return arestas;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Leitura BINÁRIA em STREAMING — ver descrição em grafo.h.
+ * ------------------------------------------------------------------------- */
+
+FILE *grafo_bin_abrir(const char *caminho)
+{
+    FILE *f = fopen(caminho, "rb");
+    if (f == NULL)
+        fprintf(stderr, "grafo_bin_abrir: nao foi possivel abrir '%s'.\n", caminho);
+    return f;
+}
+
+uint64_t grafo_bin_ler_bloco(FILE *f, Aresta *buf, uint64_t cap)
+{
+    if (f == NULL || buf == NULL || cap == 0)
+        return 0;
+    /* Cada Aresta tem 16 bytes idênticos ao registro em disco: fread direto. */
+    return (uint64_t) fread(buf, sizeof(Aresta), (size_t) cap, f);
+}
+
+int grafo_bin_info(const char *caminho, uint32_t *V, uint64_t *E)
+{
+    FILE *f = grafo_bin_abrir(caminho);
+    if (f == NULL)
+        return 0;
+
+    /* Buffer temporário de 1M arestas (16 MB) para o passe de varredura. */
+    const uint64_t CAP = 1024ULL * 1024;
+    Aresta *buf = (Aresta *) malloc((size_t) CAP * sizeof(Aresta));
+    if (buf == NULL) {
+        fprintf(stderr, "grafo_bin_info: falha ao alocar buffer.\n");
+        fclose(f);
+        return 0;
+    }
+
+    uint64_t total = 0;
+    uint32_t vmax = 0;
+    uint64_t n;
+    while ((n = grafo_bin_ler_bloco(f, buf, CAP)) > 0) {
+        for (uint64_t i = 0; i < n; i++) {
+            if (buf[i].u > vmax) vmax = buf[i].u;
+            if (buf[i].v > vmax) vmax = buf[i].v;
+        }
+        total += n;
+    }
+
+    free(buf);
+    fclose(f);
+
+    *E = total;
+    *V = (total > 0) ? (vmax + 1) : 0;
+    return 1;
 }
 
 #ifdef HAVE_MPI
@@ -384,6 +510,94 @@ Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
     return loc;
 }
 
+/* ===========================================================================
+ * ler_grafo_binario_mpiio — leitor BINÁRIO via MPI-IO (Estilo B).
+ *
+ * Como cada registro tem 16 bytes FIXOS, a partição é aritmética exata e NÃO
+ * exige alinhamento de bordas de linha (ao contrário do leitor texto). O rank i
+ * lê os registros [i*E/np, (i+1)*E/np) com MPI_File_read_at_all e reinterpreta
+ * os bytes diretamente como vetor de Aresta (mesmo layout de 16 bytes).
+ *
+ * Sem cabeçalho: E_total = tamanho/16; V = MPI_Allreduce(MAX) do maior índice
+ * de vértice local + 1.
+ * =========================================================================== */
+Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
+                                int rank, int nprocs, uint64_t *E_local,
+                                uint64_t *rec_ini, uint64_t *rec_fim)
+{
+    const uint64_t REC = sizeof(Aresta); /* 16 bytes por aresta */
+
+    /* Tipo MPI de um registro: 16 bytes contíguos. Usar um tipo de 16 bytes
+     * (em vez de MPI_CHAR com count em bytes) mantém o 'count' pequeno e evita
+     * estourar o int de count quando a fatia passa de 2 GB. */
+    MPI_Datatype TIPO_REC;
+    MPI_Type_contiguous((int) REC, MPI_BYTE, &TIPO_REC);
+    MPI_Type_commit(&TIPO_REC);
+
+    /* Abertura coletiva e tamanho do arquivo. */
+    MPI_File fh;
+    if (MPI_File_open(MPI_COMM_WORLD, caminho, MPI_MODE_RDONLY,
+                      MPI_INFO_NULL, &fh) != MPI_SUCCESS) {
+        if (rank == 0)
+            fprintf(stderr, "ler_grafo_binario_mpiio: MPI_File_open falhou ('%s').\n", caminho);
+        MPI_Type_free(&TIPO_REC);
+        return NULL;
+    }
+    MPI_Offset fsize_off = 0;
+    MPI_File_get_size(fh, &fsize_off);
+    uint64_t fsize = (uint64_t) fsize_off;
+
+    if (fsize % REC != 0 && rank == 0)
+        fprintf(stderr, "ler_grafo_binario_mpiio: AVISO — tamanho %" PRIu64
+                " nao e multiplo de %" PRIu64 " (registros truncados ignorados).\n",
+                fsize, REC);
+    uint64_t E = fsize / REC;
+    *E_total = E;
+
+    /* Partição em registros (divisão exata por offset). */
+    uint64_t r_ini = (E * (uint64_t) rank)       / (uint64_t) nprocs;
+    uint64_t r_fim = (E * (uint64_t) (rank + 1)) / (uint64_t) nprocs;
+    uint64_t nrec  = (r_fim > r_ini) ? (r_fim - r_ini) : 0;
+    *rec_ini = r_ini;
+    *rec_fim = r_fim;
+
+    /* Buffer local = vetor de Aresta (layout idêntico ao disco). */
+    Aresta *loc = (Aresta *) malloc((size_t) nrec * sizeof(Aresta));
+    if (loc == NULL && nrec > 0) {
+        fprintf(stderr, "[rank %d] ler_grafo_binario_mpiio: malloc de %" PRIu64
+                " arestas falhou.\n", rank, nrec);
+        MPI_File_close(&fh);
+        MPI_Type_free(&TIPO_REC);
+        *E_local = 0;
+        return NULL;
+    }
+
+    /* Leitura coletiva da fatia: offset em BYTES, count em REGISTROS.
+     * 'nrec' <= E (<= ~800M) cabe folgado em int. */
+    MPI_Status stt;
+    MPI_File_read_at_all(fh, (MPI_Offset) (r_ini * REC), loc, (int) nrec,
+                         TIPO_REC, &stt);
+    MPI_File_close(&fh);
+    MPI_Type_free(&TIPO_REC);
+
+    /* V global = maior índice de vértice + 1 (Allreduce MAX). */
+    uint32_t vmax_local = 0;
+    for (uint64_t i = 0; i < nrec; i++) {
+        if (loc[i].u > vmax_local) vmax_local = loc[i].u;
+        if (loc[i].v > vmax_local) vmax_local = loc[i].v;
+    }
+    uint32_t vmax_global = 0;
+    MPI_Allreduce(&vmax_local, &vmax_global, 1, MPI_UINT32_T, MPI_MAX, MPI_COMM_WORLD);
+    *V = (E > 0) ? (vmax_global + 1) : 0;
+
+    fprintf(stderr, "[rank %d] arestas locais=%" PRIu64
+            " registros=[%" PRIu64 ",%" PRIu64 ") V=%" PRIu32 "\n",
+            rank, nrec, r_ini, r_fim, *V);
+
+    *E_local = nrec;
+    return loc;
+}
+
 #else /* !HAVE_MPI — stub usado nos alvos compilados com gcc (teste/sequencial) */
 
 Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
@@ -393,6 +607,16 @@ Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
     (void) caminho; (void) V; (void) E_total; (void) rank; (void) nprocs;
     (void) E_local; (void) byte_ini; (void) byte_fim;
     fprintf(stderr, "ler_grafo_mpiio: compilado SEM -DHAVE_MPI (use mpicc).\n");
+    return NULL;
+}
+
+Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
+                                int rank, int nprocs, uint64_t *E_local,
+                                uint64_t *rec_ini, uint64_t *rec_fim)
+{
+    (void) caminho; (void) V; (void) E_total; (void) rank; (void) nprocs;
+    (void) E_local; (void) rec_ini; (void) rec_fim;
+    fprintf(stderr, "ler_grafo_binario_mpiio: compilado SEM -DHAVE_MPI (use mpicc).\n");
     return NULL;
 }
 

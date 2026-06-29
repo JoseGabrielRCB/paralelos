@@ -46,14 +46,33 @@ número de processos `N`, graças ao desempate determinístico.
 
 ## Formato dos dados de entrada
 
+O leitor é escolhido **pela extensão** do arquivo passado em `argv[1]`:
+
+### Texto (qualquer extensão != `.bin`) — usado nos testes de corretude
+
 ```
 Linha 1: V        (número de vértices)
 Linha 2: E        (número de arestas)
 Linha 3..: u v peso   (uma aresta não direcionada por linha)
 ```
 
-Índices de vértice em **base 0** (`0 .. V-1`). Pesos em `uint32_t`; a soma da MST é
-acumulada em `uint64_t` (desvio **D2**).
+### Binário (`*.bin`) — arquivo de execução real (`graph.bin`, 12,8 GB)
+
+Sequência de registros contíguos de **16 bytes**, **sem cabeçalho**:
+
+| campo | tipo | bytes |
+|---|---|---|
+| `u`    | `uint32` little-endian | 4 |
+| `v`    | `uint32` little-endian | 4 |
+| `peso` | `double` (IEEE-754) little-endian | 8 |
+
+Logo `E = tamanho_do_arquivo / 16` e, como não há cabeçalho, `V = (maior índice de
+vértice) + 1` (no paralelo, via `MPI_Allreduce(MAX)`). O layout casa exatamente com
+`struct Aresta`, então a leitura é cópia direta de bytes (sem parsing). No paralelo,
+a partição é aritmética exata por registro — sem alinhamento de bordas de linha.
+
+Índices de vértice em **base 0** (`0 .. V-1`). Pesos em `double`; a soma da MST
+também é acumulada em `double` (desvio **D2**).
 
 ### Grafo pequeno de validação (peso total esperado = **37**)
 
@@ -63,9 +82,10 @@ O grafo de 9 vértices e 14 arestas do enunciado serve para validar a corretude
 ## Desvios autorizados em relação ao pseudocódigo literal
 
 - **D1 — Representação:** lista de arestas em vez da matriz de pesos `W(u,v)`, que
-  seria inviável (~1,96M vértices ≈ 16 TB de RAM). A semântica de `W(u,v)` e do
+  seria inviável (~10M vértices ≈ 800 TB de RAM). A semântica de `W(u,v)` e do
   `MIN{...}` por componente é preservada.
-- **D2 — Tipos:** peso individual em `uint32_t`; soma total em `uint64_t`.
+- **D2 — Tipos:** peso individual em `double` (o `graph.bin` traz pesos em ponto
+  flutuante); soma total também em `double`.
 - **D3 — Parada:** o grafo é desconexo, então além do critério literal
   (`raiz(u)==raiz(v)` para todos) há a guarda: se uma fase não fizer nenhuma fusão e
   ainda houver mais de um componente, encerra retornando a **floresta** geradora mínima.

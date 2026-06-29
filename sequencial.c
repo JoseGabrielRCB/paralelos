@@ -37,13 +37,17 @@
  *   - arquivo de saída: as arestas escolhidas, uma "u v peso" por linha.
  *   - stderr: tempo de I/O e tempo de cálculo (clock_gettime CLOCK_MONOTONIC).
  */
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200112L   /* clock_gettime + fseeko/ftello */
+#define _FILE_OFFSET_BITS 64      /* off_t de 64 bits (arquivos > 2 GB) */
 
 #include "grafo.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 #include <time.h>
 #include <inttypes.h>
+#include <sys/types.h>
 
 /* Sentinela para "aresta de menor peso = Nenhuma".
  *
@@ -60,6 +64,19 @@
 static double seg(struct timespec a, struct timespec b)
 {
     return (double) (b.tv_sec - a.tv_sec) + (double) (b.tv_nsec - a.tv_nsec) / 1e9;
+}
+
+/* Verdadeiro se 'nome' termina em 'suf' (case-insensitive). Usado para escolher
+ * o leitor: arquivos ".bin" => binário (graph.bin); senão => texto. */
+static int tem_sufixo(const char *nome, const char *suf)
+{
+    size_t ln = strlen(nome), ls = strlen(suf);
+    if (ln < ls) return 0;
+    const char *p = nome + (ln - ls);
+    for (size_t i = 0; i < ls; i++)
+        if (tolower((unsigned char) p[i]) != tolower((unsigned char) suf[i]))
+            return 0;
+    return 1;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -81,8 +98,8 @@ static int for_preferido_sobre(const Aresta *arestas, uint32_t cand, uint32_t at
     if (atual == ARESTA_NENHUMA)
         return 1; /* atual is "None" */
 
-    uint32_t pc = arestas[cand].peso;
-    uint32_t pa = arestas[atual].peso;
+    double pc = arestas[cand].peso;
+    double pa = arestas[atual].peso;
     if (pc < pa) return 1; /* peso estritamente menor */
     if (pc > pa) return 0;
 
@@ -96,26 +113,224 @@ static int for_preferido_sobre(const Aresta *arestas, uint32_t cand, uint32_t at
     return cmax < amax; /* se (min,max) iguais => não preferida (retorna 0) */
 }
 
+/* ------------------------------------------------------------------------- *
+ * MODO STREAMING SÓ-LEITURA (forma LITERAL da Parte I, para arquivos binários
+ * que não cabem na RAM, ex.: graph.bin de 12,8 GB).
+ *
+ * O pseudocódigo literal varre o E ORIGINAL a cada fase ("para cada aresta uv
+ * em E ..."). Fazemos exatamente isso: a cada fase RE-LEMOS o arquivo de entrada
+ * em BLOCOS, calculando a menor aresta por componente. A "menor aresta por
+ * componente" é guardada como struct EXPLÍCITA (peso+u+v+valido), igual ao
+ * paralelo.c — o desempate é o MESMO (peso; em empate, menor par (min,max)),
+ * então o resultado é idêntico ao modo em-RAM e ao paralelo.
+ *
+ * IMPORTANTE: este modo NÃO grava nada em disco (sem arquivos de rascunho), há
+ * apenas LEITURA. Assim o uso de memória é O(bloco) + O(V) e a page cache é
+ * totalmente recuperável, sem acúmulo de dirty pages — crucial em VMs pequenas
+ * (ex.: WSL2 com 3,5 GB), onde escritas pesadas inundariam o cache e travariam
+ * a VM. O custo é reler o arquivo a cada fase (~E*fases bytes lidos), aceitável
+ * por ser I/O sequencial puro.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    uint8_t  valido; /* 0 = "Nenhuma" */
+    double   peso;
+    uint32_t u;
+    uint32_t v;
+} MenorE;
+
+/* 'cand' é preferida sobre 'atual'? (mesma ordem total de for_preferido_sobre) */
+static int menor_preferida(const MenorE *cand, const MenorE *atual)
+{
+    if (!cand->valido)  return 0;
+    if (!atual->valido) return 1;
+    if (cand->peso < atual->peso) return 1;
+    if (cand->peso > atual->peso) return 0;
+    uint32_t cmin = cand->u < cand->v ? cand->u : cand->v;
+    uint32_t cmax = cand->u < cand->v ? cand->v : cand->u;
+    uint32_t amin = atual->u < atual->v ? atual->u : atual->v;
+    uint32_t amax = atual->u < atual->v ? atual->v : atual->u;
+    if (cmin != amin) return cmin < amin;
+    return cmax < amax;
+}
+
+/* Em quantos blocos o arquivo ORIGINAL é subdividido por fase (cada fase relê
+ * o arquivo de entrada em NUM_BLOCOS_STREAM pedaços). Para o graph.bin
+ * (800M arestas = 12,8 GB), 12 blocos => ~1 GB por bloco. */
+#define NUM_BLOCOS_STREAM 12
+
+/* Atualiza best[] com uma aresta candidata (u,v,peso) já sabidamente entre
+ * componentes diferentes ru!=rv. */
+static inline void atualiza_best(MenorE *best, uint32_t ru, uint32_t rv,
+                                 uint32_t u, uint32_t v, double peso)
+{
+    MenorE cand = { 1, peso, u, v };
+    if (menor_preferida(&cand, &best[ru])) best[ru] = cand;
+    if (menor_preferida(&cand, &best[rv])) best[rv] = cand;
+}
+
+/* Núcleo Borůvka em streaming SÓ-LEITURA (forma literal da Parte I). A cada fase
+ * relê o arquivo 'entrada' em blocos. Preenche mst[]/soma/fases; usa o 'dsu' já
+ * inicializado. Retorna 1 em sucesso, 0 em falha de alocação/I-O. */
+static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
+                          Aresta *mst, uint64_t *p_mst_n, double *p_soma,
+                          uint32_t *p_fases, int *p_d3)
+{
+    /* Bloco de leitura = teto(E / 12) arestas (subdivide a fonte em 12 pedaços). */
+    uint64_t BUF = (E + NUM_BLOCOS_STREAM - 1) / NUM_BLOCOS_STREAM;
+    if (BUF == 0) BUF = 1;
+
+    fprintf(stderr,
+            "Streaming..........: %d blocos/fase, ~%.0f MB por bloco "
+            "(BUF=%" PRIu64 " arestas)\n",
+            NUM_BLOCOS_STREAM,
+            (double) BUF * sizeof(Aresta) / (1024.0 * 1024.0), BUF);
+
+    MenorE *best = (MenorE *) malloc((size_t) V * sizeof(MenorE));
+    Aresta *buf  = (Aresta *) malloc((size_t) BUF * sizeof(Aresta)); /* leitura */
+    if (best == NULL || buf == NULL) {
+        fprintf(stderr, "boruvka_stream: falha de alocacao (best/buf).\n");
+        free(best); free(buf);
+        return 0;
+    }
+
+    double   soma  = 0.0;
+    uint64_t mst_n = 0;
+    uint32_t fases = 0;
+    int      d3    = 0;
+    int concluido  = 0;
+
+    while (!concluido) {
+        fases++;
+        for (uint32_t c = 0; c < V; c++) best[c].valido = 0;
+
+        /* (a)-(c) RE-LÊ o E original em blocos (apenas leitura, sem rascunho);
+         * para cada aresta uv entre componentes diferentes, atualiza o menor do
+         * componente de u e o de v. Semântica idêntica a "para cada aresta uv
+         * em E" do pseudocódigo. */
+        FILE *fr = grafo_bin_abrir(entrada);
+        if (fr == NULL) { free(best); free(buf); return 0; }
+
+        uint32_t blocos = 0;
+        uint64_t n;
+        while ((n = grafo_bin_ler_bloco(fr, buf, BUF)) > 0) {
+            for (uint64_t i = 0; i < n; i++) {
+                uint32_t ru = dsu_find(dsu, buf[i].u);
+                uint32_t rv = dsu_find(dsu, buf[i].v);
+                if (ru == rv) continue; /* mesma componente: descartada (continue) */
+                atualiza_best(best, ru, rv, buf[i].u, buf[i].v, buf[i].peso);
+            }
+            blocos++;
+        }
+        fclose(fr);
+
+        fprintf(stderr, "  fase %2" PRIu32 ": %" PRIu32 " blocos lidos\n",
+                fases, blocos);
+
+        /* (d) todos "Nenhuma" -> concluído. */
+        int algum = 0;
+        for (uint32_t c = 0; c < V; c++)
+            if (best[c].valido) { algum = 1; break; }
+
+        if (!algum) {
+            concluido = 1;
+        } else {
+            /* (e) aplica as uniões (mesma ordem c crescente — resultado idêntico). */
+            uint64_t fusoes = 0;
+            for (uint32_t c = 0; c < V; c++) {
+                if (!best[c].valido) continue;
+                if (dsu_union(dsu, best[c].u, best[c].v)) {
+                    mst[mst_n].u = best[c].u;
+                    mst[mst_n].v = best[c].v;
+                    mst[mst_n].peso = best[c].peso;
+                    mst_n++;
+                    soma += best[c].peso;
+                    fusoes++;
+                }
+            }
+            if (fusoes == 0) { d3 = 1; concluido = 1; }
+        }
+    }
+
+    free(best);
+    free(buf);
+
+    *p_mst_n = mst_n;
+    *p_soma  = soma;
+    *p_fases = fases;
+    *p_d3    = d3;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "uso: %s <arquivo_dados> [arquivo_saida]\n", argv[0]);
+        fprintf(stderr, "uso: %s [--stream] <arquivo_dados> [arquivo_saida]\n", argv[0]);
+        fprintf(stderr, "  --stream: le o .bin em BLOCOS (memoria O(bloco)); para\n"
+                        "            arquivos grandes que nao cabem na RAM. Auto-ligado\n"
+                        "            para .bin > 2 GB.\n");
         return 1;
     }
-    const char *entrada = argv[1];
-    const char *saida   = (argc >= 3) ? argv[2] : "mst_sequencial.txt";
+
+    /* Flag opcional --stream (ou -s) antes do arquivo. */
+    int stream_flag = 0;
+    int ai = 1;
+    if (argv[1][0] == '-') {
+        if (strcmp(argv[1], "--stream") == 0 || strcmp(argv[1], "-s") == 0)
+            stream_flag = 1;
+        else
+            fprintf(stderr, "Aviso: opcao '%s' desconhecida; ignorada.\n", argv[1]);
+        ai = 2;
+    }
+    if (argc <= ai) {
+        fprintf(stderr, "uso: %s [--stream] <arquivo_dados> [arquivo_saida]\n", argv[0]);
+        return 1;
+    }
+    const char *entrada = argv[ai];
+    const char *saida   = (argc >= ai + 2) ? argv[ai + 1] : "mst_sequencial.txt";
 
     struct timespec t0, t1;
 
     /* ===================== 1) LEITURA (I/O) ===================== */
     uint32_t V = 0;
     uint64_t E = 0;
+    int binario = tem_sufixo(entrada, ".bin");
+
+    /* Decide STREAMING: por flag, ou auto se o .bin passa de 2 GB (nao caberia
+     * na RAM como vetor unico). Streaming exige binario. */
+    int stream = 0;
+    if (binario) {
+        if (stream_flag) {
+            stream = 1;
+        } else {
+            FILE *ft = grafo_bin_abrir(entrada);
+            if (ft) {
+                if (fseeko(ft, 0, SEEK_END) == 0) {
+                    off_t sz = ftello(ft);
+                    if (sz > (off_t) 2 * 1024 * 1024 * 1024) stream = 1; /* > 2 GB */
+                }
+                fclose(ft);
+            }
+        }
+    } else if (stream_flag) {
+        fprintf(stderr, "Aviso: --stream so vale para arquivos .bin; ignorado.\n");
+    }
+
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    Aresta *arestas = ler_grafo_texto(entrada, &V, &E);
+    Aresta *arestas = NULL;
+    if (stream) {
+        /* Streaming: nao carrega o grafo; so descobre V e E num passe. */
+        if (!grafo_bin_info(entrada, &V, &E)) V = 0;
+    } else {
+        arestas = binario ? ler_grafo_binario(entrada, &V, &E)
+                          : ler_grafo_texto(entrada, &V, &E);
+    }
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double tempo_io = seg(t0, t1);
+    fprintf(stderr, "Leitor.............: %s\n",
+            stream ? "binario STREAMING (.bin, blocos)"
+                   : (binario ? "binario (.bin, em RAM)" : "texto"));
 
-    if (arestas == NULL || V == 0) {
+    if (V == 0 || (!stream && arestas == NULL)) {
         fprintf(stderr, "Erro: falha ao ler o grafo.\n");
         free(arestas);
         return 1;
@@ -131,86 +346,107 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* comp[i]     = componente (raiz) do vértice i, recalculado a cada fase.
-     * menor[c]    = índice da aresta de menor peso do componente c ("Nenhuma" se ARESTA_NENHUMA).
-     * mst[]       = arestas adicionadas a E' (a floresta resultante). */
-    uint32_t *comp  = (uint32_t *) malloc((size_t) V * sizeof(uint32_t));
-    uint32_t *menor = (uint32_t *) malloc((size_t) V * sizeof(uint32_t));
-    Aresta   *mst   = (Aresta *)   malloc((size_t) V * sizeof(Aresta)); /* <= V-1 arestas */
-    if (comp == NULL || menor == NULL || mst == NULL) {
-        fprintf(stderr, "Erro: falha de alocacao no calculo.\n");
-        free(comp); free(menor); free(mst);
+    /* mst[] = arestas adicionadas a E' (a floresta resultante); <= V-1 arestas. */
+    Aresta *mst = (Aresta *) malloc((size_t) V * sizeof(Aresta));
+    if (mst == NULL) {
+        fprintf(stderr, "Erro: falha de alocacao (mst).\n");
         dsu_free(&dsu); free(arestas);
         return 1;
     }
 
-    uint64_t soma   = 0;  /* D2: soma dos pesos em uint64_t */
+    double   soma   = 0.0; /* D2: soma dos pesos em ponto flutuante */
     uint64_t mst_n  = 0;  /* número de arestas em E' */
     uint32_t fases  = 0;
     int desconexo_sem_fusao = 0; /* sinaliza a guarda D3 (fase sem fusão) */
 
-    int concluido = 0;
-    while (!concluido) {
-        fases++;
-
-        /* (a) Componentes conectados de F: cada vértice recebe sua raiz. */
-        for (uint32_t i = 0; i < V; i++)
-            comp[i] = dsu_find(&dsu, i);
-
-        /* (b) Aresta de menor peso de cada componente := "Nenhuma". */
-        for (uint32_t i = 0; i < V; i++)
-            menor[i] = ARESTA_NENHUMA;
-
-        /* (c) Para cada aresta uv com u,v em componentes diferentes,
-         *     atualiza o menor do componente de u e o do componente de v. */
-        for (uint64_t i = 0; i < E; i++) {
-            uint32_t cu = comp[arestas[i].u];
-            uint32_t cv = comp[arestas[i].v];
-            if (cu == cv)
-                continue; /* mesma componente: não conecta árvores distintas */
-
-            if (for_preferido_sobre(arestas, (uint32_t) i, menor[cu]))
-                menor[cu] = (uint32_t) i;
-            if (for_preferido_sobre(arestas, (uint32_t) i, menor[cv]))
-                menor[cv] = (uint32_t) i;
+    if (stream) {
+        /* ----- MODO STREAMING: re-lê o arquivo em blocos a cada fase. ----- */
+        if (!boruvka_stream(entrada, V, E, &dsu, mst, &mst_n, &soma, &fases,
+                            &desconexo_sem_fusao)) {
+            fprintf(stderr, "Erro: falha no calculo em streaming.\n");
+            free(mst); dsu_free(&dsu);
+            return 1;
+        }
+    } else {
+        /* ----- MODO EM-RAM: grafo inteiro em 'arestas[]'. ----- */
+        /* comp[i]  = componente (raiz) do vértice i, recalculado a cada fase.
+         * menor[c] = índice da aresta de menor peso do componente c ("Nenhuma"
+         *            se ARESTA_NENHUMA). */
+        uint32_t *comp  = (uint32_t *) malloc((size_t) V * sizeof(uint32_t));
+        uint32_t *menor = (uint32_t *) malloc((size_t) V * sizeof(uint32_t));
+        if (comp == NULL || menor == NULL) {
+            fprintf(stderr, "Erro: falha de alocacao no calculo.\n");
+            free(comp); free(menor); free(mst);
+            dsu_free(&dsu); free(arestas);
+            return 1;
         }
 
-        /* (d) "se todos os componentes têm menor == Nenhuma" -> concluído. */
-        int algum = 0;
-        for (uint32_t c = 0; c < V; c++) {
-            if (menor[c] != ARESTA_NENHUMA) { algum = 1; break; }
-        }
+        int concluido = 0;
+        while (!concluido) {
+            fases++;
 
-        if (!algum) {
-            /* Forma LITERAL de parada da Parte I: nenhuma árvore pode ser
-             * mesclada (não há aresta entre componentes diferentes). */
-            concluido = 1;
-        } else {
-            /* (e) Adiciona a aresta de menor peso de cada componente em E'.
-             * O dsu_union evita ciclos: uma aresta escolhida simultaneamente
-             * pelos dois extremos (comp(u) e comp(v)), ou que fecharia ciclo
-             * dentro da fase, retorna 0 e não é contada — preservando a
-             * propriedade de FLORESTA exigida pelo pseudocódigo. */
-            uint64_t fusoes = 0;
+            /* (a) Componentes conectados de F: cada vértice recebe sua raiz. */
+            for (uint32_t i = 0; i < V; i++)
+                comp[i] = dsu_find(&dsu, i);
+
+            /* (b) Aresta de menor peso de cada componente := "Nenhuma". */
+            for (uint32_t i = 0; i < V; i++)
+                menor[i] = ARESTA_NENHUMA;
+
+            /* (c) Para cada aresta uv com u,v em componentes diferentes,
+             *     atualiza o menor do componente de u e o do componente de v. */
+            for (uint64_t i = 0; i < E; i++) {
+                uint32_t cu = comp[arestas[i].u];
+                uint32_t cv = comp[arestas[i].v];
+                if (cu == cv)
+                    continue; /* mesma componente: não conecta árvores distintas */
+
+                if (for_preferido_sobre(arestas, (uint32_t) i, menor[cu]))
+                    menor[cu] = (uint32_t) i;
+                if (for_preferido_sobre(arestas, (uint32_t) i, menor[cv]))
+                    menor[cv] = (uint32_t) i;
+            }
+
+            /* (d) "se todos os componentes têm menor == Nenhuma" -> concluído. */
+            int algum = 0;
             for (uint32_t c = 0; c < V; c++) {
-                if (menor[c] == ARESTA_NENHUMA)
-                    continue;
-                Aresta e = arestas[menor[c]];
-                if (dsu_union(&dsu, e.u, e.v)) {
-                    mst[mst_n++] = e;
-                    soma += (uint64_t) e.peso; /* D2 */
-                    fusoes++;
+                if (menor[c] != ARESTA_NENHUMA) { algum = 1; break; }
+            }
+
+            if (!algum) {
+                /* Forma LITERAL de parada da Parte I: nenhuma árvore pode ser
+                 * mesclada (não há aresta entre componentes diferentes). */
+                concluido = 1;
+            } else {
+                /* (e) Adiciona a aresta de menor peso de cada componente em E'.
+                 * O dsu_union evita ciclos: uma aresta escolhida simultaneamente
+                 * pelos dois extremos (comp(u) e comp(v)), ou que fecharia ciclo
+                 * dentro da fase, retorna 0 e não é contada — preservando a
+                 * propriedade de FLORESTA exigida pelo pseudocódigo. */
+                uint64_t fusoes = 0;
+                for (uint32_t c = 0; c < V; c++) {
+                    if (menor[c] == ARESTA_NENHUMA)
+                        continue;
+                    Aresta e = arestas[menor[c]];
+                    if (dsu_union(&dsu, e.u, e.v)) {
+                        mst[mst_n++] = e;
+                        soma += e.peso; /* D2 */
+                        fusoes++;
+                    }
+                }
+
+                /* GUARDA D3: se havia arestas candidatas mas nenhuma fusão
+                 * ocorreu, não há progresso possível — encerra retornando a
+                 * floresta. (Com DSU válido isto não deveria ocorrer.) */
+                if (fusoes == 0) {
+                    desconexo_sem_fusao = 1;
+                    concluido = 1;
                 }
             }
-
-            /* GUARDA D3: se havia arestas candidatas mas nenhuma fusão ocorreu,
-             * não há progresso possível — encerra retornando a floresta.
-             * (Com DSU válido isto não deveria ocorrer; mantido por segurança.) */
-            if (fusoes == 0) {
-                desconexo_sem_fusao = 1;
-                concluido = 1;
-            }
         }
+
+        free(comp);
+        free(menor);
     }
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -220,8 +456,8 @@ int main(int argc, char **argv)
 
     /* ===================== 3) SAÍDA ===================== */
 
-    /* 3.1 stdout: peso total. */
-    printf("Peso total da MST: %" PRIu64 "\n", soma);
+    /* 3.1 stdout: peso total (ponto flutuante). */
+    printf("Peso total da MST: %.10g\n", soma);
 
     /* 3.2 arquivo: MST como LISTA DE ARESTAS, uma por linha, no formato do
      *     enunciado "<u> → (<peso>) → <v>" (mesmo formato do paralelo.c, para
@@ -231,7 +467,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "Aviso: nao foi possivel abrir '%s' para escrita.\n", saida);
     } else {
         for (uint64_t i = 0; i < mst_n; i++)
-            fprintf(fo, "%" PRIu32 " → (%" PRIu32 ") → %" PRIu32 "\n",
+            fprintf(fo, "%" PRIu32 " → (%.10g) → %" PRIu32 "\n",
                     mst[i].u, mst[i].peso, mst[i].v);
         fclose(fo);
     }
@@ -258,7 +494,8 @@ int main(int argc, char **argv)
     fprintf(stderr, "----------------------------------------\n");
 
     /* ===================== 4) LIBERAÇÃO ===================== */
-    free(comp); free(menor); free(mst);
+    /* comp/menor já foram liberados no modo em-RAM; arestas é NULL em streaming. */
+    free(mst);
     dsu_free(&dsu);
     free(arestas);
     return 0;
