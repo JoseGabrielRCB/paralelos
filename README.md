@@ -41,6 +41,24 @@ Requisitos: `gcc` e uma implementação de MPI (ex.: Open MPI, fornecendo `mpicc
 mpirun -np <N> ./paralelo <arquivo_dados> [arquivo_saida]
 ```
 
+### Eficiência do sequencial em streaming (`SEQ_RAM_EDGES`)
+
+No modo streaming (`.bin` grande), o sequencial relê o arquivo a cada fase de
+Borůvka — o I/O é o gargalo. Como o DSU só funde componentes, uma aresta cujos
+extremos já estão na mesma componente nunca mais é útil. Definindo
+`SEQ_RAM_EDGES=<n>`, assim que as arestas que **ainda cruzam** componentes
+couberem em `n` posições na RAM, elas são capturadas e as fases seguintes
+**param de reler o disco** (varrem só esse subconjunto). O resultado é idêntico;
+serve quando há RAM sobrando:
+
+```sh
+# captura ate 80M arestas (~1,3 GB) -> corta drasticamente as releituras
+SEQ_RAM_EDGES=80000000 ./sequencial graph.bin saida.txt
+```
+
+Sem a variável (padrão), o comportamento é o de só-leitura — memória O(bloco),
+seguro em VMs pequenas (ex.: WSL2).
+
 A versão paralela deve produzir **o mesmo peso total** que a sequencial para qualquer
 número de processos `N`, graças ao desempate determinístico.
 

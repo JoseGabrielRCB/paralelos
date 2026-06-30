@@ -243,9 +243,12 @@ int main(int argc, char **argv)
     ArestaMin *best = (ArestaMin *) malloc((size_t) V * sizeof(ArestaMin));
     /* mst[] = arestas escolhidas (replicado; <= V-1). */
     Aresta    *mst  = (Aresta *)    malloc((size_t) V * sizeof(Aresta));
-    if (best == NULL || mst == NULL) {
-        if (rank == 0) fprintf(stderr, "Erro: sem memoria (best/mst).\n");
-        free(best); free(mst); free(loc); dsu_free(&dsu);
+    /* comp[i] = raiz(i) recomputada 1x por fase: evita 2 dsu_find por aresta
+     * (busca de ponteiros / cache-miss) trocando-os por leituras de vetor plano. */
+    uint32_t  *comp = (uint32_t *)  malloc((size_t) V * sizeof(uint32_t));
+    if (best == NULL || mst == NULL || comp == NULL) {
+        if (rank == 0) fprintf(stderr, "Erro: sem memoria (best/mst/comp).\n");
+        free(best); free(mst); free(comp); free(loc); dsu_free(&dsu);
         if (logf) fclose(logf);
         MPI_Finalize();
         return 1;
@@ -290,11 +293,16 @@ int main(int argc, char **argv)
             best[c].v = 0;
         }
 
+        /* comp[i] := raiz(i) uma vez por fase (vetor plano, cache-friendly).
+         * Nenhuma união ocorre nesta varredura => comp[] estável e resultado
+         * idêntico a chamar dsu_find por aresta. */
+        for (uint32_t i = 0; i < V; i++) comp[i] = dsu_find(&dsu, i);
+
         /* (2) cada rank percorre SUAS arestas locais e, para (u,v) em
          *     componentes diferentes, atualiza o melhor de raiz(u) e raiz(v). */
         for (uint64_t i = 0; i < E_local; i++) {
-            uint32_t ru = dsu_find(&dsu, loc[i].u);
-            uint32_t rv = dsu_find(&dsu, loc[i].v);
+            uint32_t ru = comp[loc[i].u];
+            uint32_t rv = comp[loc[i].v];
             if (ru == rv)
                 continue; /* mesma árvore: não conecta componentes distintos */
 
@@ -410,6 +418,7 @@ int main(int argc, char **argv)
     MPI_Type_free(&TIPO_ARESTA_MIN);
     free(best);
     free(mst);
+    free(comp);
     free(loc);
     dsu_free(&dsu);
 

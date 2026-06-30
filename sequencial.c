@@ -185,12 +185,43 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
             NUM_BLOCOS_STREAM,
             (double) BUF * sizeof(Aresta) / (1024.0 * 1024.0), BUF);
 
-    MenorE *best = (MenorE *) malloc((size_t) V * sizeof(MenorE));
-    Aresta *buf  = (Aresta *) malloc((size_t) BUF * sizeof(Aresta)); /* leitura */
-    if (best == NULL || buf == NULL) {
-        fprintf(stderr, "boruvka_stream: falha de alocacao (best/buf).\n");
-        free(best); free(buf);
+    MenorE   *best = (MenorE *)   malloc((size_t) V * sizeof(MenorE));
+    uint32_t *comp = (uint32_t *) malloc((size_t) V * sizeof(uint32_t)); /* raiz por fase */
+    Aresta   *buf  = (Aresta *)   malloc((size_t) BUF * sizeof(Aresta)); /* leitura */
+    if (best == NULL || comp == NULL || buf == NULL) {
+        fprintf(stderr, "boruvka_stream: falha de alocacao (best/comp/buf).\n");
+        free(best); free(comp); free(buf);
         return 0;
+    }
+
+    /* CAPTURA-EM-RAM (opcional, opt-in por SEQ_RAM_EDGES=<n_arestas>).
+     * O modo SÓ-LEITURA relê o arquivo a cada fase => I/O ~ E * fases (dominante
+     * para o graph.bin). Como o DSU só FUNDE componentes (nunca separa), uma
+     * aresta cujos extremos já caíram na mesma componente NUNCA mais será útil.
+     * Logo, assim que as arestas que AINDA cruzam componentes couberem na RAM,
+     * guardamos esse subconjunto e paramos de reler o disco — as fases seguintes
+     * varrem só ele. O resultado é IDÊNTICO (descartar aresta interna é sempre
+     * seguro). Desligado por padrão para preservar a memória O(bloco) em VMs
+     * pequenas (WSL2); ligue com, p.ex., SEQ_RAM_EDGES=80000000 (~1,3 GB). */
+    uint64_t cap = 0;
+    {
+        const char *env = getenv("SEQ_RAM_EDGES");
+        if (env != NULL) cap = strtoull(env, NULL, 10);
+    }
+    Aresta  *ram    = NULL;
+    uint64_t ram_n  = 0;
+    int      in_ram = 0;
+    if (cap > 0) {
+        ram = (Aresta *) malloc((size_t) cap * sizeof(Aresta));
+        if (ram == NULL) {
+            fprintf(stderr, "  [captura] sem memoria para %" PRIu64
+                    " arestas; seguindo em SO-LEITURA.\n", cap);
+            cap = 0;
+        } else {
+            fprintf(stderr, "  [captura] habilitada: ate %" PRIu64
+                    " arestas (~%.0f MB) podem migrar para RAM.\n",
+                    cap, (double) cap * sizeof(Aresta) / (1024.0 * 1024.0));
+        }
     }
 
     double   soma  = 0.0;
@@ -201,30 +232,63 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
 
     while (!concluido) {
         fases++;
+
+        /* comp[i] := raiz(i) UMA vez por fase: troca 2 dsu_find por aresta (busca
+         * de ponteiros / cache-miss) por 2 leituras de vetor plano. Como nenhuma
+         * união ocorre durante a varredura, comp[] é estável e o resultado é
+         * idêntico ao de chamar dsu_find por aresta. */
+        for (uint32_t i = 0; i < V; i++) comp[i] = dsu_find(dsu, i);
         for (uint32_t c = 0; c < V; c++) best[c].valido = 0;
 
-        /* (a)-(c) RE-LÊ o E original em blocos (apenas leitura, sem rascunho);
-         * para cada aresta uv entre componentes diferentes, atualiza o menor do
-         * componente de u e o de v. Semântica idêntica a "para cada aresta uv
-         * em E" do pseudocódigo. */
-        FILE *fr = grafo_bin_abrir(entrada);
-        if (fr == NULL) { free(best); free(buf); return 0; }
-
-        uint32_t blocos = 0;
-        uint64_t n;
-        while ((n = grafo_bin_ler_bloco(fr, buf, BUF)) > 0) {
-            for (uint64_t i = 0; i < n; i++) {
-                uint32_t ru = dsu_find(dsu, buf[i].u);
-                uint32_t rv = dsu_find(dsu, buf[i].v);
-                if (ru == rv) continue; /* mesma componente: descartada (continue) */
-                atualiza_best(best, ru, rv, buf[i].u, buf[i].v, buf[i].peso);
+        if (in_ram) {
+            /* Arestas vivas já estão em RAM: varre só elas, sem tocar no disco. */
+            for (uint64_t i = 0; i < ram_n; i++) {
+                uint32_t cu = comp[ram[i].u], cv = comp[ram[i].v];
+                if (cu == cv) continue;
+                atualiza_best(best, cu, cv, ram[i].u, ram[i].v, ram[i].peso);
             }
-            blocos++;
-        }
-        fclose(fr);
+            fprintf(stderr, "  fase %2" PRIu32 ": %" PRIu64 " arestas em RAM\n",
+                    fases, ram_n);
+        } else {
+            /* (a)-(c) RE-LÊ o E original em blocos (apenas leitura, sem rascunho);
+             * para cada aresta uv entre componentes diferentes, atualiza o menor
+             * do componente de u e o de v. Opcionalmente captura essas arestas. */
+            FILE *fr = grafo_bin_abrir(entrada);
+            if (fr == NULL) { free(best); free(comp); free(buf); free(ram); return 0; }
 
-        fprintf(stderr, "  fase %2" PRIu32 ": %" PRIu32 " blocos lidos\n",
-                fases, blocos);
+            int      capturando = (cap > 0);
+            uint64_t cap_n      = 0;
+            int      estourou   = 0;
+            uint32_t blocos     = 0;
+            uint64_t n;
+            while ((n = grafo_bin_ler_bloco(fr, buf, BUF)) > 0) {
+                for (uint64_t i = 0; i < n; i++) {
+                    uint32_t cu = comp[buf[i].u], cv = comp[buf[i].v];
+                    if (cu == cv) continue; /* mesma componente: descartada */
+                    atualiza_best(best, cu, cv, buf[i].u, buf[i].v, buf[i].peso);
+                    if (capturando) {
+                        if (cap_n < cap) ram[cap_n++] = buf[i];
+                        else { capturando = 0; estourou = 1; } /* nao coube: aborta captura */
+                    }
+                }
+                blocos++;
+            }
+            fclose(fr);
+
+            if (cap > 0 && !estourou) {
+                /* Todas as arestas que cruzam componentes couberam em 'ram':
+                 * a partir daqui NÃO relemos mais o disco. */
+                ram_n  = cap_n;
+                in_ram = 1;
+                free(buf); buf = NULL;
+                fprintf(stderr, "  fase %2" PRIu32 ": %" PRIu32 " blocos lidos; "
+                        "%" PRIu64 " arestas vivas migradas para RAM (fim das releituras).\n",
+                        fases, blocos, ram_n);
+            } else {
+                fprintf(stderr, "  fase %2" PRIu32 ": %" PRIu32 " blocos lidos%s\n",
+                        fases, blocos, (cap > 0) ? " (ainda nao coube em RAM)" : "");
+            }
+        }
 
         /* (d) todos "Nenhuma" -> concluído. */
         int algum = 0;
@@ -252,7 +316,9 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
     }
 
     free(best);
+    free(comp);
     free(buf);
+    free(ram);
 
     *p_mst_n = mst_n;
     *p_soma  = soma;
