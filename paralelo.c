@@ -190,9 +190,18 @@ int main(int argc, char **argv)
     uint32_t V = 0;
     uint64_t E_total = 0, E_local = 0, byte_ini = 0, byte_fim = 0;
     int binario = tem_sufixo(entrada, ".bin");
+    /* Leitor binário: por padrão usa a versão DISTRIBUÍDA (rank 0 lê e envia as
+     * fatias pela rede), que NÃO exige o arquivo em todas as máquinas — adequada
+     * a um cluster por SSH sem disco compartilhado. Se houver NFS/disco comum em
+     * todos os nós, exporte GRAFO_MPIIO=1 para usar a leitura coletiva MPI-IO
+     * (cada rank lê sua fatia em paralelo, mais rápida nesse caso). */
+    int usar_mpiio = (getenv("GRAFO_MPIIO") != NULL);
     Aresta *loc = binario
-        ? ler_grafo_binario_mpiio(entrada, &V, &E_total, rank, size,
-                                  &E_local, &byte_ini, &byte_fim)
+        ? (usar_mpiio
+            ? ler_grafo_binario_mpiio(entrada, &V, &E_total, rank, size,
+                                      &E_local, &byte_ini, &byte_fim)
+            : ler_grafo_binario_dist(entrada, &V, &E_total, rank, size,
+                                     &E_local, &byte_ini, &byte_fim))
         : ler_grafo_mpiio(entrada, &V, &E_total, rank, size,
                           &E_local, &byte_ini, &byte_fim);
     if (loc == NULL || V == 0) {

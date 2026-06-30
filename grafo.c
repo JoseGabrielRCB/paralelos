@@ -598,6 +598,146 @@ Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_to
     return loc;
 }
 
+/* ===========================================================================
+ * ler_grafo_binario_dist — leitor BINÁRIO sem armazenamento compartilhado.
+ *
+ * MOTIVAÇÃO: ler_grafo_binario_mpiio usa MPI_File_open(MPI_COMM_WORLD, ...),
+ * que exige o arquivo ACESSÍVEL POR TODOS os ranks (mesmo disco local em cada
+ * máquina, ou um sistema de arquivos compartilhado como NFS). Quando o
+ * graph.bin existe em UMA ÚNICA máquina e não há NFS (nem permissão de sudo
+ * para montá-lo), aquela abertura coletiva falha nos demais nós.
+ *
+ * ESTRATÉGIA: apenas o rank 0 (na máquina que tem o arquivo) abre e lê; cada
+ * rank recebe pela REDE (MPI_Send/Recv) exatamente a fatia que leria no esquema
+ * coletivo. A PARTIÇÃO é a MESMA aritmética [i*E/np, (i+1)*E/np), logo cada rank
+ * fica com as mesmas arestas de antes — o algoritmo de Borůvka e o resultado
+ * (peso total) são preservados bit a bit; muda só o TRANSPORTE dos dados.
+ *
+ * EFICIÊNCIA / ESCALA: o rank 0 NÃO carrega o arquivo inteiro. Lê em blocos de
+ * CHUNK arestas e os envia, mantendo memória O(CHUNK) no transporte; cada rank
+ * (inclusive o 0) guarda apenas a SUA fatia (E/np arestas), igual ao coletivo.
+ * O custo extra é o rank 0 ler os 12,8 GB do disco local e enviá-los pela rede
+ * (em vez de leitura paralela MPI-IO) — inevitável sem disco compartilhado.
+ * =========================================================================== */
+Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_total,
+                               int rank, int nprocs, uint64_t *E_local,
+                               uint64_t *rec_ini, uint64_t *rec_fim)
+{
+    const uint64_t REC   = sizeof(Aresta);            /* 16 bytes por aresta */
+    const uint64_t CHUNK = 4ull * 1024 * 1024;        /* arestas/bloco (~64 MB) */
+    const int      TAG   = 77;
+
+    /* Tipo MPI de 16 bytes: mantém o 'count' das mensagens em REGISTROS (cabe
+     * em int) mesmo quando a fatia ultrapassa 2 GB. */
+    MPI_Datatype TIPO_REC;
+    MPI_Type_contiguous((int) REC, MPI_BYTE, &TIPO_REC);
+    MPI_Type_commit(&TIPO_REC);
+
+    /* 1) Só o rank 0 descobre E_total pelo tamanho do arquivo; difunde a todos. */
+    uint64_t E = 0;
+    FILE *f = NULL;
+    if (rank == 0) {
+        f = fopen(caminho, "rb");
+        if (f == NULL) {
+            fprintf(stderr, "ler_grafo_binario_dist: rank 0 nao abriu '%s'.\n", caminho);
+        } else if (fseeko(f, 0, SEEK_END) == 0) {
+            off_t sz = ftello(f);
+            if (sz > 0) {
+                if ((uint64_t) sz % REC != 0)
+                    fprintf(stderr, "ler_grafo_binario_dist: AVISO — tamanho %lld nao e"
+                            " multiplo de %" PRIu64 " (resto ignorado).\n",
+                            (long long) sz, REC);
+                E = (uint64_t) sz / REC;
+            }
+        }
+    }
+    MPI_Bcast(&E, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+    if (E == 0) {
+        if (f != NULL) fclose(f);
+        MPI_Type_free(&TIPO_REC);
+        return NULL;
+    }
+    *E_total = E;
+
+    /* 2) Partição IDÊNTICA à versão coletiva (preserva o algoritmo). */
+    uint64_t r_ini = (E * (uint64_t) rank)       / (uint64_t) nprocs;
+    uint64_t r_fim = (E * (uint64_t) (rank + 1)) / (uint64_t) nprocs;
+    uint64_t nrec  = (r_fim > r_ini) ? (r_fim - r_ini) : 0;
+    *rec_ini = r_ini;
+    *rec_fim = r_fim;
+
+    Aresta *loc = (Aresta *) malloc((size_t) (nrec ? nrec : 1) * sizeof(Aresta));
+    if (loc == NULL) {
+        fprintf(stderr, "[rank %d] ler_grafo_binario_dist: malloc de %" PRIu64
+                " arestas falhou.\n", rank, nrec);
+        if (f != NULL) fclose(f);
+        MPI_Type_free(&TIPO_REC);
+        *E_local = 0;
+        return NULL;
+    }
+
+    /* 3) Transporte: rank 0 lê e envia; os demais recebem a SUA fatia. */
+    if (rank == 0) {
+        /* Própria fatia (a primeira do arquivo) — leitura direta. */
+        if (nrec > 0) {
+            fseeko(f, (off_t) (r_ini * REC), SEEK_SET);
+            if (fread(loc, REC, (size_t) nrec, f) != nrec)
+                fprintf(stderr, "[rank 0] ler_grafo_binario_dist: leitura curta da propria fatia.\n");
+        }
+        /* Fatias dos demais ranks, em ordem crescente de offset (disco sequencial),
+         * cada uma fracionada em blocos de CHUNK arestas. */
+        Aresta *tmp = (Aresta *) malloc((size_t) CHUNK * sizeof(Aresta));
+        if (tmp == NULL) {
+            fprintf(stderr, "[rank 0] ler_grafo_binario_dist: malloc do buffer de envio falhou.\n");
+            free(loc); fclose(f); MPI_Type_free(&TIPO_REC); *E_local = 0;
+            return NULL;
+        }
+        for (int p = 1; p < nprocs; p++) {
+            uint64_t pi  = (E * (uint64_t) p)       / (uint64_t) nprocs;
+            uint64_t pf  = (E * (uint64_t) (p + 1)) / (uint64_t) nprocs;
+            uint64_t rem = (pf > pi) ? (pf - pi) : 0;
+            fseeko(f, (off_t) (pi * REC), SEEK_SET);
+            while (rem > 0) {
+                uint64_t blk = (rem < CHUNK) ? rem : CHUNK;
+                if (fread(tmp, REC, (size_t) blk, f) != blk)
+                    fprintf(stderr, "[rank 0] ler_grafo_binario_dist: leitura curta (rank %d).\n", p);
+                MPI_Send(tmp, (int) blk, TIPO_REC, p, TAG, MPI_COMM_WORLD);
+                rem -= blk;
+            }
+        }
+        free(tmp);
+        fclose(f);
+    } else {
+        /* Recebe a própria fatia, nos MESMOS blocos em que o rank 0 a enviou. */
+        uint64_t rem = nrec, off = 0;
+        while (rem > 0) {
+            uint64_t blk = (rem < CHUNK) ? rem : CHUNK;
+            MPI_Status stt;
+            MPI_Recv(loc + off, (int) blk, TIPO_REC, 0, TAG, MPI_COMM_WORLD, &stt);
+            off += blk;
+            rem -= blk;
+        }
+    }
+
+    /* 4) V global = maior índice de vértice + 1 (Allreduce MAX) — idêntico ao coletivo. */
+    uint32_t vmax_local = 0;
+    for (uint64_t i = 0; i < nrec; i++) {
+        if (loc[i].u > vmax_local) vmax_local = loc[i].u;
+        if (loc[i].v > vmax_local) vmax_local = loc[i].v;
+    }
+    uint32_t vmax_global = 0;
+    MPI_Allreduce(&vmax_local, &vmax_global, 1, MPI_UINT32_T, MPI_MAX, MPI_COMM_WORLD);
+    *V = (E > 0) ? (vmax_global + 1) : 0;
+
+    fprintf(stderr, "[rank %d] (dist) arestas locais=%" PRIu64
+            " registros=[%" PRIu64 ",%" PRIu64 ") V=%" PRIu32 "\n",
+            rank, nrec, r_ini, r_fim, *V);
+
+    *E_local = nrec;
+    MPI_Type_free(&TIPO_REC);
+    return loc;
+}
+
 #else /* !HAVE_MPI — stub usado nos alvos compilados com gcc (teste/sequencial) */
 
 Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
@@ -617,6 +757,16 @@ Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_to
     (void) caminho; (void) V; (void) E_total; (void) rank; (void) nprocs;
     (void) E_local; (void) rec_ini; (void) rec_fim;
     fprintf(stderr, "ler_grafo_binario_mpiio: compilado SEM -DHAVE_MPI (use mpicc).\n");
+    return NULL;
+}
+
+Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_total,
+                               int rank, int nprocs, uint64_t *E_local,
+                               uint64_t *rec_ini, uint64_t *rec_fim)
+{
+    (void) caminho; (void) V; (void) E_total; (void) rank; (void) nprocs;
+    (void) E_local; (void) rec_ini; (void) rec_fim;
+    fprintf(stderr, "ler_grafo_binario_dist: compilado SEM -DHAVE_MPI (use mpicc).\n");
     return NULL;
 }
 

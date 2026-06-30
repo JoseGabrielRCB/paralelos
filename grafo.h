@@ -167,4 +167,24 @@ Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_to
                                 int rank, int nprocs, uint64_t *E_local,
                                 uint64_t *rec_ini, uint64_t *rec_fim);
 
+/* Lê/distribui o grafo BINÁRIO SEM armazenamento compartilhado (Estilo B).
+ *
+ * Alternativa a ler_grafo_binario_mpiio para quando o arquivo existe em UMA
+ * única máquina e NÃO há disco compartilhado (NFS) entre os nós — o cenário
+ * típico de um cluster montado por SSH sem permissão de sudo. Em vez da abertura
+ * coletiva MPI_File_open(MPI_COMM_WORLD, ...) (que exigiria o arquivo em todos os
+ * nós), apenas o rank 0 abre e lê o arquivo e ENVIA pela rede (MPI_Send) a fatia
+ * de cada rank.
+ *
+ * A PARTIÇÃO é idêntica à da versão coletiva — rank i é dono dos registros
+ * [i*E/np, (i+1)*E/np) — logo o resultado (peso total da AGM) é o mesmo, para
+ * qualquer nº de processos. O rank 0 lê em blocos e envia, mantendo memória
+ * O(bloco) no transporte; cada rank guarda apenas a sua fatia (E/np arestas).
+ *
+ * Mesma assinatura/semântica de saída de ler_grafo_binario_mpiio. Stub (NULL)
+ * quando compilado sem -DHAVE_MPI. */
+Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_total,
+                               int rank, int nprocs, uint64_t *E_local,
+                               uint64_t *rec_ini, uint64_t *rec_fim);
+
 #endif /* GRAFO_H */

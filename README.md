@@ -44,6 +44,30 @@ mpirun -np <N> ./paralelo <arquivo_dados> [arquivo_saida]
 A versão paralela deve produzir **o mesmo peso total** que a sequencial para qualquer
 número de processos `N`, graças ao desempate determinístico.
 
+### Cluster por SSH sem disco compartilhado (graph.bin numa máquina só)
+
+Quando o `graph.bin` existe em **apenas uma** das máquinas e **não há NFS** entre
+os nós (cenário típico de cluster por SSH sem `sudo`), o leitor binário **padrão**
+(`ler_grafo_binario_dist`) faz o **rank 0 ler o arquivo e enviar a fatia de cada
+processo pela rede** (MPI_Send). O arquivo só precisa existir na máquina onde roda
+o rank 0 (a primeira do `hostfile`). A **partição é a mesma** da leitura coletiva
+(rank `i` = registros `[i*E/np, (i+1)*E/np)`), então o **peso total é idêntico**.
+
+```sh
+# graph.bin existe só na 1ª máquina do hostfile; nada é copiado para as outras.
+mpirun -np 8 --hostfile hosts \
+  --mca btl_tcp_if_include 172.26.1.0/24 \
+  ./paralelo graph.bin saida.txt
+```
+
+Se **houver** disco compartilhado (NFS) com o `graph.bin` visível em todos os nós,
+exporte `GRAFO_MPIIO=1` para usar a leitura **coletiva MPI-IO** (cada rank lê sua
+fatia em paralelo, mais rápida nesse caso):
+
+```sh
+GRAFO_MPIIO=1 mpirun -np 8 --hostfile hosts ./paralelo graph.bin saida.txt
+```
+
 ## Formato dos dados de entrada
 
 O leitor é escolhido **pela extensão** do arquivo passado em `argv[1]`:
