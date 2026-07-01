@@ -1,3 +1,7 @@
+/* AGM por Boruvka SEQUENCIAL (Parte I). Dois modos:
+ *  - em-RAM: grafo inteiro em vetor (texto ou .bin pequeno);
+ *  - streaming: rele o .bin em blocos a cada fase (memoria O(bloco)).
+ * Uso: ./sequencial [--stream] <arquivo_dados> [arquivo_saida]. */
 #define _POSIX_C_SOURCE 200112L
 #define _FILE_OFFSET_BITS 64
 
@@ -10,6 +14,7 @@
 #include <inttypes.h>
 #include <sys/types.h>
 
+/* "Nenhuma" = sentinela de INDICE de aresta (nao de peso). Seguro pois E < UINT32_MAX. */
 #define ARESTA_NENHUMA UINT32_MAX
 
 static double seg(struct timespec a, struct timespec b)
@@ -17,6 +22,7 @@ static double seg(struct timespec a, struct timespec b)
     return (double) (b.tv_sec - a.tv_sec) + (double) (b.tv_nsec - a.tv_nsec) / 1e9;
 }
 
+/* True se 'nome' termina em 'suf' (case-insensitive): escolhe .bin vs texto. */
 static int tem_sufixo(const char *nome, const char *suf)
 {
     size_t ln = strlen(nome), ls = strlen(suf);
@@ -28,6 +34,9 @@ static int tem_sufixo(const char *nome, const char *suf)
     return 1;
 }
 
+/* Desempate (ordem total): 'cand' preferida sobre 'atual' sse menor peso; em
+ * empate, menor par (min,max) normalizado. Mesma regra do paralelo -> resultado
+ * identico. 'atual' pode ser ARESTA_NENHUMA. Modo em-RAM (indices de aresta). */
 static int for_preferido_sobre(const Aresta *arestas, uint32_t cand, uint32_t atual)
 {
     if (atual == ARESTA_NENHUMA)
@@ -47,6 +56,8 @@ static int for_preferido_sobre(const Aresta *arestas, uint32_t cand, uint32_t at
     return cmax < amax;
 }
 
+/* Melhor aresta por componente no modo streaming (guarda a aresta explicita,
+ * nao um indice, pois no streaming nao ha vetor global de arestas). */
 typedef struct {
     uint8_t  valido;
     double   peso;
@@ -54,6 +65,7 @@ typedef struct {
     uint32_t v;
 } MenorE;
 
+/* Mesmo desempate de for_preferido_sobre, versao struct. */
 static int menor_preferida(const MenorE *cand, const MenorE *atual)
 {
     if (!cand->valido)  return 0;
@@ -68,8 +80,10 @@ static int menor_preferida(const MenorE *cand, const MenorE *atual)
     return cmax < amax;
 }
 
+/* Nº de blocos em que cada fase rele o .bin (12 -> ~1 GB/bloco no graph.bin). */
 #define NUM_BLOCOS_STREAM 12
 
+/* Considera a aresta (u,v) p/ os componentes ru e rv (ja sabidos distintos). */
 static inline void atualiza_best(MenorE *best, uint32_t ru, uint32_t rv,
                                  uint32_t u, uint32_t v, double peso)
 {
@@ -78,11 +92,12 @@ static inline void atualiza_best(MenorE *best, uint32_t ru, uint32_t rv,
     if (menor_preferida(&cand, &best[rv])) best[rv] = cand;
 }
 
+/* Nucleo Boruvka em STREAMING: a cada fase rele 'entrada' em blocos, acha a
+ * melhor aresta de saida por componente, aplica as unioes. */
 static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
                           Aresta *mst, uint64_t *p_mst_n, double *p_soma,
                           uint32_t *p_fases, int *p_d3)
 {
-
     uint64_t BUF = (E + NUM_BLOCOS_STREAM - 1) / NUM_BLOCOS_STREAM;
     if (BUF == 0) BUF = 1;
 
@@ -101,6 +116,9 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
         return 0;
     }
 
+    /* Otimizacao opt-in SEQ_RAM_EDGES=<n>: quando as arestas que ainda cruzam
+     * componentes couberem em 'ram', migra-as p/ RAM e para de reler o disco.
+     * Seguro: aresta interna a um componente nunca mais e util no Boruvka. */
     uint64_t cap = 0;
     {
         const char *env = getenv("SEQ_RAM_EDGES");
@@ -131,11 +149,13 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
     while (!concluido) {
         fases++;
 
+        /* comp[i] := raiz(i) 1x por fase (vetor plano; nenhuma uniao ocorre na
+         * varredura, entao comp[] fica estavel). Depois zera o best. */
         for (uint32_t i = 0; i < V; i++) comp[i] = dsu_find(dsu, i);
         for (uint32_t c = 0; c < V; c++) best[c].valido = 0;
 
         if (in_ram) {
-
+            /* arestas vivas ja em RAM: varre so elas */
             for (uint64_t i = 0; i < ram_n; i++) {
                 uint32_t cu = comp[ram[i].u], cv = comp[ram[i].v];
                 if (cu == cv) continue;
@@ -144,7 +164,7 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
             fprintf(stderr, "  fase %2" PRIu32 ": %" PRIu64 " arestas em RAM\n",
                     fases, ram_n);
         } else {
-
+            /* rele o .bin em blocos; opcionalmente captura as arestas vivas */
             FILE *fr = grafo_bin_abrir(entrada);
             if (fr == NULL) { free(best); free(comp); free(buf); free(ram); return 0; }
 
@@ -160,7 +180,7 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
                     atualiza_best(best, cu, cv, buf[i].u, buf[i].v, buf[i].peso);
                     if (capturando) {
                         if (cap_n < cap) ram[cap_n++] = buf[i];
-                        else { capturando = 0; estourou = 1; }
+                        else { capturando = 0; estourou = 1; } /* nao coube: aborta captura */
                     }
                 }
                 blocos++;
@@ -168,7 +188,7 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
             fclose(fr);
 
             if (cap > 0 && !estourou) {
-
+                /* todas as vivas couberam: fim das releituras de disco */
                 ram_n  = cap_n;
                 in_ram = 1;
                 free(buf); buf = NULL;
@@ -181,6 +201,7 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
             }
         }
 
+        /* parada: nenhum componente tem aresta de saida */
         int algum = 0;
         for (uint32_t c = 0; c < V; c++)
             if (best[c].valido) { algum = 1; break; }
@@ -188,7 +209,7 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
         if (!algum) {
             concluido = 1;
         } else {
-
+            /* aplica as unioes (dsu_union filtra ciclos/dupla escolha) */
             uint64_t fusoes = 0;
             for (uint32_t c = 0; c < V; c++) {
                 if (!best[c].valido) continue;
@@ -201,7 +222,7 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
                     fusoes++;
                 }
             }
-            if (fusoes == 0) { d3 = 1; concluido = 1; }
+            if (fusoes == 0) { d3 = 1; concluido = 1; } /* guarda D3: sem progresso */
         }
     }
 
@@ -227,6 +248,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* flag opcional --stream/-s antes do arquivo */
     int stream_flag = 0;
     int ai = 1;
     if (argv[1][0] == '-') {
@@ -245,10 +267,12 @@ int main(int argc, char **argv)
 
     struct timespec t0, t1;
 
+    /* ===== 1) leitura ===== */
     uint32_t V = 0;
     uint64_t E = 0;
     int binario = tem_sufixo(entrada, ".bin");
 
+    /* decide streaming: por flag, ou auto se o .bin passa de 2 GB */
     int stream = 0;
     if (binario) {
         if (stream_flag) {
@@ -270,7 +294,7 @@ int main(int argc, char **argv)
     clock_gettime(CLOCK_MONOTONIC, &t0);
     Aresta *arestas = NULL;
     if (stream) {
-
+        /* streaming: nao carrega o grafo, so descobre V e E */
         if (!grafo_bin_info(entrada, &V, &E)) V = 0;
     } else {
         arestas = binario ? ler_grafo_binario(entrada, &V, &E)
@@ -288,6 +312,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* ===== 2) calculo (Boruvka) ===== */
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
     DSU dsu;
@@ -297,6 +322,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* mst[] = arestas da floresta resultante (<= V-1). */
     Aresta *mst = (Aresta *) malloc((size_t) V * sizeof(Aresta));
     if (mst == NULL) {
         fprintf(stderr, "Erro: falha de alocacao (mst).\n");
@@ -310,7 +336,6 @@ int main(int argc, char **argv)
     int desconexo_sem_fusao = 0;
 
     if (stream) {
-
         if (!boruvka_stream(entrada, V, E, &dsu, mst, &mst_n, &soma, &fases,
                             &desconexo_sem_fusao)) {
             fprintf(stderr, "Erro: falha no calculo em streaming.\n");
@@ -318,7 +343,8 @@ int main(int argc, char **argv)
             return 1;
         }
     } else {
-
+        /* ----- modo em-RAM: grafo inteiro em arestas[] ----- */
+        /* comp[i]=raiz(i) por fase; menor[c]=indice da melhor aresta do comp. c. */
         uint32_t *comp  = (uint32_t *) malloc((size_t) V * sizeof(uint32_t));
         uint32_t *menor = (uint32_t *) malloc((size_t) V * sizeof(uint32_t));
         if (comp == NULL || menor == NULL) {
@@ -338,6 +364,8 @@ int main(int argc, char **argv)
             for (uint32_t i = 0; i < V; i++)
                 menor[i] = ARESTA_NENHUMA;
 
+            /* para cada aresta entre componentes distintos, atualiza o menor
+             * dos componentes de u e de v */
             for (uint64_t i = 0; i < E; i++) {
                 uint32_t cu = comp[arestas[i].u];
                 uint32_t cv = comp[arestas[i].v];
@@ -356,10 +384,10 @@ int main(int argc, char **argv)
             }
 
             if (!algum) {
-
+                /* parada literal (Parte I): nenhuma arvore pode ser mesclada */
                 concluido = 1;
             } else {
-
+                /* adiciona a melhor aresta de cada componente; dsu_union evita ciclo */
                 uint64_t fusoes = 0;
                 for (uint32_t c = 0; c < V; c++) {
                     if (menor[c] == ARESTA_NENHUMA)
@@ -372,7 +400,7 @@ int main(int argc, char **argv)
                     }
                 }
 
-                if (fusoes == 0) {
+                if (fusoes == 0) { /* guarda D3: sem progresso -> encerra */
                     desconexo_sem_fusao = 1;
                     concluido = 1;
                 }
@@ -388,8 +416,10 @@ int main(int argc, char **argv)
 
     uint32_t n_comp = dsu_num_componentes(&dsu);
 
+    /* ===== 3) saida ===== */
     printf("Peso total da MST: %.10g\n", soma);
 
+    /* arquivo: MST como lista de arestas (podem ser milhoes -> nao no stdout) */
     FILE *fo = fopen(saida, "w");
     if (fo == NULL) {
         fprintf(stderr, "Aviso: nao foi possivel abrir '%s' para escrita.\n", saida);
@@ -410,7 +440,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "Tempo de I/O.......: %.6f s\n", tempo_io);
     fprintf(stderr, "Tempo de calculo...: %.6f s\n", tempo_calc);
     if (n_comp > 1) {
-
+        /* D3: grafo desconexo -> retorna floresta, nao 1 arvore */
         fprintf(stderr,
             "[D3] Condicao literal '1 componente' NAO atendida: grafo DESCONEXO "
             "(%" PRIu32 " componentes). Retornada a FLORESTA geradora minima.\n", n_comp);

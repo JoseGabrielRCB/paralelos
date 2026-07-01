@@ -1,3 +1,10 @@
+/* AGM por Boruvka PARALELO (Parte II), Estilo B (coletivas MPI).
+ *
+ * Ideia: DSU REPLICADO e identico em todos os ranks (nao trafega). Cada rank
+ * varre so suas arestas locais e monta a "melhor aresta por componente"; um
+ * MPI_Allreduce com MPI_Op customizada combina esses vetores -> todos ficam com
+ * o best global identico e aplicam as MESMAS unioes na MESMA ordem. Por isso o
+ * peso total independe do numero de processos. */
 #include <mpi.h>
 #include "grafo.h"
 
@@ -9,6 +16,8 @@
 #include <string.h>
 #include <ctype.h>
 
+/* Melhor aresta de um componente; trafega no Allreduce. "Nenhuma" = valido==0
+ * (campo explicito, NAO peso sentinela: peso real pode chegar perto de UINT32_MAX). */
 typedef struct {
     uint8_t  valido;
     double   peso;
@@ -16,6 +25,7 @@ typedef struct {
     uint32_t v;
 } ArestaMin;
 
+/* True se 'nome' termina em 'suf' (case-insensitive): escolhe .bin vs texto. */
 static int tem_sufixo(const char *nome, const char *suf)
 {
     size_t ln = strlen(nome), ls = strlen(suf);
@@ -27,6 +37,8 @@ static int tem_sufixo(const char *nome, const char *suf)
     return 1;
 }
 
+/* Desempate (ordem total, = for_preferido_sobre do sequencial): x preferida
+ * sobre y sse x valida e (y invalida, ou peso menor, ou par (min,max) menor). */
 static inline int aresta_preferida(const ArestaMin *x, const ArestaMin *y)
 {
     if (!x->valido) return 0;
@@ -42,6 +54,8 @@ static inline int aresta_preferida(const ArestaMin *x, const ArestaMin *y)
     return xmax < ymax;
 }
 
+/* MPI_Op customizada: por elemento, mantem em inout a aresta preferida.
+ * E um MIN sob ordem total -> comutativa/associativa (commute=1). */
 static void op_aresta_min(void *in_, void *inout_, int *len, MPI_Datatype *dt)
 {
     (void) dt;
@@ -52,6 +66,7 @@ static void op_aresta_min(void *in_, void *inout_, int *len, MPI_Datatype *dt)
             inout[i] = in[i];
 }
 
+/* Grava (rank 0) a MST como lista de arestas "u → (peso) → v". */
 static void escrever_saida_rank0(const char *saida, const Aresta *mst,
                                  uint64_t mst_n)
 {
@@ -86,9 +101,13 @@ int main(int argc, char **argv)
     snprintf(lognome, sizeof lognome, "log_rank%d.txt", rank);
     FILE *logf = fopen(lognome, "w");
 
+    /* tempo TOTAL (com barreira p/ alinhar os ranks) */
     MPI_Barrier(MPI_COMM_WORLD);
     double t_total_ini = MPI_Wtime();
 
+    /* ===== leitura/distribuicao =====
+     * .bin: por padrao leitor DIST (rank 0 le e envia; sem disco compartilhado).
+     * GRAFO_MPIIO=1 usa o leitor coletivo MPI-IO (exige NFS). Texto: MPI-IO. */
     uint32_t V = 0;
     uint64_t E_total = 0, E_local = 0, byte_ini = 0, byte_fim = 0;
     int binario = tem_sufixo(entrada, ".bin");
@@ -120,20 +139,20 @@ int main(int argc, char **argv)
         fflush(logf);
     }
 
+    /* tempo SO-calculo (exclui a leitura) */
     MPI_Barrier(MPI_COMM_WORLD);
     double t_calc_ini = MPI_Wtime();
 
+    /* DSU replicado: raiz(i) := i (igual em todos os ranks). */
     DSU dsu;
     if (!dsu_init(&dsu, V)) {
         if (rank == 0) fprintf(stderr, "Erro: dsu_init falhou (V=%" PRIu32 ").\n", V);
         free(loc); if (logf) fclose(logf); MPI_Finalize(); return 1;
     }
 
-    ArestaMin *best = (ArestaMin *) malloc((size_t) V * sizeof(ArestaMin));
-
-    Aresta    *mst  = (Aresta *)    malloc((size_t) V * sizeof(Aresta));
-
-    uint32_t  *comp = (uint32_t *)  malloc((size_t) V * sizeof(uint32_t));
+    ArestaMin *best = (ArestaMin *) malloc((size_t) V * sizeof(ArestaMin)); /* best por componente */
+    Aresta    *mst  = (Aresta *)    malloc((size_t) V * sizeof(Aresta));    /* arestas escolhidas */
+    uint32_t  *comp = (uint32_t *)  malloc((size_t) V * sizeof(uint32_t));  /* raiz(i) por fase */
     if (best == NULL || mst == NULL || comp == NULL) {
         if (rank == 0) fprintf(stderr, "Erro: sem memoria (best/mst/comp).\n");
         free(best); free(mst); free(comp); free(loc); dsu_free(&dsu);
@@ -144,6 +163,8 @@ int main(int argc, char **argv)
     uint64_t mst_n = 0;
     double   soma  = 0.0;
 
+    /* Tipo MPI de ArestaMin via offsetof; resized p/ sizeof (ha padding apos
+     * 'valido' por causa do double) -> Allreduce avanca certo entre elementos. */
     MPI_Datatype TIPO_ARESTA_MIN;
     {
         int          blk[4]   = {1, 1, 1, 1};
@@ -158,7 +179,6 @@ int main(int argc, char **argv)
         MPI_Type_commit(&TIPO_ARESTA_MIN);
         MPI_Type_free(&tmp);
     }
-
     MPI_Op OP_ARESTA_MIN;
     MPI_Op_create(op_aresta_min, 1 , &OP_ARESTA_MIN);
 
@@ -170,6 +190,7 @@ int main(int argc, char **argv)
         fase++;
         double tf0 = MPI_Wtime();
 
+        /* (1) zera best (todos "Nenhuma") */
         for (uint32_t c = 0; c < V; c++) {
             best[c].valido = 0;
             best[c].peso = 0;
@@ -177,22 +198,38 @@ int main(int argc, char **argv)
             best[c].v = 0;
         }
 
+        /* comp[i] := raiz(i) 1x por fase (vetor plano, cache-friendly) */
         for (uint32_t i = 0; i < V; i++) comp[i] = dsu_find(&dsu, i);
 
+        /* (2) varre arestas LOCAIS; p/ (u,v) entre componentes diferentes,
+         *     atualiza o best de raiz(u) e de raiz(v).
+         *     COMPACTACAO: aresta com ru==rv esta morta p/ sempre (o DSU so
+         *     funde componentes), entao e descartada do vetor local (swap p/
+         *     'w'). As proximas fases varrem so as sobreviventes -> E_local
+         *     encolhe fase a fase. O conjunto considerado p/ selecao e o mesmo,
+         *     logo a MST/peso nao muda. */
+        uint64_t w = 0;
         for (uint64_t i = 0; i < E_local; i++) {
             uint32_t ru = comp[loc[i].u];
             uint32_t rv = comp[loc[i].v];
             if (ru == rv)
-                continue;
+                continue; /* morta: nao recopia (sai do vetor) */
 
-            ArestaMin cand = { 1 , loc[i].peso, loc[i].u, loc[i].v };
+            Aresta a = loc[i];
+            loc[w++] = a; /* sobrevivente: compacta in-place (w <= i) */
+
+            ArestaMin cand = { 1 , a.peso, a.u, a.v };
             if (aresta_preferida(&cand, &best[ru])) best[ru] = cand;
             if (aresta_preferida(&cand, &best[rv])) best[rv] = cand;
         }
+        E_local = w; /* proximas fases so varrem as arestas vivas */
 
+        /* (3) combina os best locais -> best global identico em todos (IN_PLACE) */
         MPI_Allreduce(MPI_IN_PLACE, best, (int) V, TIPO_ARESTA_MIN,
                       OP_ARESTA_MIN, MPI_COMM_WORLD);
 
+        /* (4) todos aplicam as MESMAS unioes na MESMA ordem (c crescente);
+         *     dsu_union==0 descarta a aresta que fecharia ciclo */
         uint64_t fusoes = 0;
         for (uint32_t c = 0; c < V; c++) {
             if (!best[c].valido)
@@ -208,6 +245,8 @@ int main(int argc, char **argv)
             }
         }
 
+        /* (5) parada: reduz "houve fusao?" (Estilo B). 0 fusoes -> fim (1
+         *     componente = condicao literal; >1 = grafo desconexo, guarda D3) */
         uint64_t fusoes_global = 0;
         MPI_Allreduce(&fusoes, &fusoes_global, 1, MPI_UINT64_T, MPI_SUM,
                       MPI_COMM_WORLD);
@@ -220,7 +259,6 @@ int main(int argc, char **argv)
         }
 
         if (fusoes_global == 0) {
-
             finalizado = 1;
         }
     }
@@ -229,6 +267,7 @@ int main(int argc, char **argv)
     if (ncomp > 1)
         d3_floresta = 1;
 
+    /* fim: barreira e calculo de TOTAL e SO-calculo */
     MPI_Barrier(MPI_COMM_WORLD);
     double t_fim   = MPI_Wtime();
     double t_total = t_fim - t_total_ini;
@@ -244,8 +283,8 @@ int main(int argc, char **argv)
         fclose(logf);
     }
 
+    /* ===== saida (so rank 0) ===== */
     if (rank == 0) {
-
         printf("Peso total da MST: %.10g\n", soma);
 
         escrever_saida_rank0(saida, mst, mst_n);

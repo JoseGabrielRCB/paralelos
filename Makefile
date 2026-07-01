@@ -11,9 +11,9 @@
 # ----------------------------- CONFIGURACAO --------------------------------
 RGM         := rgm48936
 # MAE = no que roda o rank 0 (vira a 1a linha do hostfile).
-MAE         := l1m20u24
+MAE         := l1m19u24
 # MAQUINAS = demais nos (acrescente os que quiser; NAO repita o MAE aqui).
-MAQUINAS    := l1m19u24 l1m21u24 l1m22u24 l1m23u24
+MAQUINAS    := l1m21u24 l1m22u24 l1m18u24 l1m14u24 l1m28u24 l1m30u24 l1m31u24
 # REMOTE_PATH = MESMO caminho em todas as maquinas (home e' local, nao compartilhado).
 REMOTE_PATH := /home/local/$(RGM)/paralelos
 
