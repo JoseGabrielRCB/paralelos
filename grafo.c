@@ -1,7 +1,3 @@
-/*
- * grafo.c — Implementação do DSU (Union-Find) e do I/O (texto e binário).
- */
-/* Para fseeko/ftello e off_t de 64 bits (arquivos > 2 GB, ex.: graph.bin). */
 #define _FILE_OFFSET_BITS 64
 #define _POSIX_C_SOURCE 200112L
 
@@ -12,19 +8,15 @@
 #include <inttypes.h>
 #include <sys/types.h>
 
-/* ------------------------------------------------------------------------- *
- * DSU
- * ------------------------------------------------------------------------- */
-
 int dsu_init(DSU *dsu, uint32_t n)
 {
     if (dsu == NULL || n == 0)
         return 0;
 
     dsu->pai  = (uint32_t *) malloc((size_t) n * sizeof(uint32_t));
-    dsu->rank = (uint32_t *) calloc((size_t) n, sizeof(uint32_t)); /* rank=0 */
+    dsu->rank = (uint32_t *) calloc((size_t) n, sizeof(uint32_t));
     if (dsu->pai == NULL || dsu->rank == NULL) {
-        /* Falha de alocação: libera o que tiver sido alocado e zera. */
+
         free(dsu->pai);
         free(dsu->rank);
         dsu->pai = NULL;
@@ -33,7 +25,6 @@ int dsu_init(DSU *dsu, uint32_t n)
         return 0;
     }
 
-    /* Cada vértice começa como seu próprio conjunto (singleton). */
     for (uint32_t i = 0; i < n; i++)
         dsu->pai[i] = i;
 
@@ -54,13 +45,11 @@ void dsu_free(DSU *dsu)
 
 uint32_t dsu_find(DSU *dsu, uint32_t x)
 {
-    /* COMPRESSÃO DE CAMINHO: faz cada nó visitado apontar direto p/ a raiz.
-     * Implementação iterativa (segura para V grande — evita estouro de pilha). */
+
     uint32_t raiz = x;
     while (dsu->pai[raiz] != raiz)
         raiz = dsu->pai[raiz];
 
-    /* Segunda passada: aponta todos do caminho para a raiz encontrada. */
     while (dsu->pai[x] != raiz) {
         uint32_t prox = dsu->pai[x];
         dsu->pai[x] = raiz;
@@ -75,24 +64,23 @@ int dsu_union(DSU *dsu, uint32_t a, uint32_t b)
     uint32_t rb = dsu_find(dsu, b);
 
     if (ra == rb)
-        return 0; /* já no mesmo conjunto: fusão redundante */
+        return 0;
 
-    /* UNION BY RANK: pendura a árvore de menor rank sob a de maior rank. */
     if (dsu->rank[ra] < dsu->rank[rb]) {
         dsu->pai[ra] = rb;
     } else if (dsu->rank[ra] > dsu->rank[rb]) {
         dsu->pai[rb] = ra;
     } else {
-        /* Ranks iguais: escolhe uma raiz e incrementa seu rank. */
+
         dsu->pai[rb] = ra;
         dsu->rank[ra]++;
     }
-    return 1; /* houve fusão */
+    return 1;
 }
 
 uint32_t dsu_num_componentes(DSU *dsu)
 {
-    /* Um componente por vértice que é raiz de si mesmo. */
+
     uint32_t comp = 0;
     for (uint32_t i = 0; i < dsu->n; i++)
         if (dsu_find(dsu, i) == i)
@@ -100,21 +88,15 @@ uint32_t dsu_num_componentes(DSU *dsu)
     return comp;
 }
 
-/* ------------------------------------------------------------------------- *
- * I/O — STUBS (Fase 0). Implementação real nas fases seguintes.
- * ------------------------------------------------------------------------- */
-
-/* Retorna a próxima linha NÃO vazia (que tenha algum caractere não-branco) de f,
- * gravada em buf. Retorna NULL no fim de arquivo. Usada só para o cabeçalho. */
 static char *proxima_linha_nao_vazia(FILE *f, char *buf, int n)
 {
     while (fgets(buf, n, f) != NULL) {
         for (const char *p = buf; *p; p++)
             if (!isspace((unsigned char) *p))
-                return buf; /* achou conteúdo */
-        /* linha só com espaços/quebra: ignora e tenta a próxima */
+                return buf;
+
     }
-    return NULL; /* EOF */
+    return NULL;
 }
 
 Aresta *ler_grafo_texto(const char *caminho, uint32_t *V, uint64_t *E)
@@ -127,7 +109,6 @@ Aresta *ler_grafo_texto(const char *caminho, uint32_t *V, uint64_t *E)
 
     char linha[256];
 
-    /* --- Cabeçalho: linha 1 = V, linha 2 = E (confiar no E do cabeçalho). --- */
     if (proxima_linha_nao_vazia(f, linha, sizeof linha) == NULL ||
         sscanf(linha, "%" SCNu32, V) != 1) {
         fprintf(stderr, "ler_grafo_texto: cabecalho invalido (V).\n");
@@ -142,7 +123,6 @@ Aresta *ler_grafo_texto(const char *caminho, uint32_t *V, uint64_t *E)
         return NULL;
     }
 
-    /* Aloca exatamente E arestas (confiando no cabeçalho). */
     Aresta *arestas = (Aresta *) malloc((size_t) E_cab * sizeof(Aresta));
     if (arestas == NULL) {
         fprintf(stderr, "ler_grafo_texto: falha ao alocar %" PRIu64 " arestas.\n", E_cab);
@@ -150,18 +130,16 @@ Aresta *ler_grafo_texto(const char *caminho, uint32_t *V, uint64_t *E)
         return NULL;
     }
 
-    /* --- Arestas: "u v peso". Linhas em branco/mal-formadas sao IGNORADAS
-     *     (o arquivo tem 1 linha vazia no final). Para de ler ao atingir E. --- */
     uint64_t lidas = 0;
     uint64_t ignoradas = 0;
     while (lidas < E_cab && fgets(linha, sizeof linha, f) != NULL) {
         uint32_t u, v;
-        double peso; /* D2: peso em ponto flutuante */
+        double peso;
         if (sscanf(linha, "%" SCNu32 " %" SCNu32 " %lf", &u, &v, &peso) != 3) {
-            ignoradas++; /* linha em branco ou mal-formada */
+            ignoradas++;
             continue;
         }
-        /* Índices base 0: validos em 0..V-1. Fora disso = mal-formada. */
+
         if (u >= *V || v >= *V) {
             ignoradas++;
             continue;
@@ -180,17 +158,10 @@ Aresta *ler_grafo_texto(const char *caminho, uint32_t *V, uint64_t *E)
         fprintf(stderr, "ler_grafo_texto: AVISO — lidas %" PRIu64 " de %" PRIu64 " arestas do cabecalho.\n",
                 lidas, E_cab);
 
-    *E = lidas; /* número de arestas efetivamente carregadas */
+    *E = lidas;
     return arestas;
 }
 
-/* ------------------------------------------------------------------------- *
- * ler_grafo_binario — leitor BINÁRIO sequencial do formato de `graph.bin`.
- *
- * Cada registro tem 16 bytes (u uint32, v uint32, peso double), exatamente o
- * layout de struct Aresta, então a leitura é uma cópia direta para o vetor.
- * Não há cabeçalho: E = tamanho/16 e V = (maior índice de vértice) + 1.
- * ------------------------------------------------------------------------- */
 Aresta *ler_grafo_binario(const char *caminho, uint32_t *V, uint64_t *E)
 {
     FILE *f = fopen(caminho, "rb");
@@ -199,7 +170,6 @@ Aresta *ler_grafo_binario(const char *caminho, uint32_t *V, uint64_t *E)
         return NULL;
     }
 
-    /* Tamanho do arquivo (fseek/ftello para suportar > 2 GB). */
     if (fseeko(f, 0, SEEK_END) != 0) {
         fprintf(stderr, "ler_grafo_binario: fseeko falhou.\n");
         fclose(f);
@@ -223,8 +193,7 @@ Aresta *ler_grafo_binario(const char *caminho, uint32_t *V, uint64_t *E)
         return NULL;
     }
 
-    /* Leitura em blocos (fread de >2 GB de uma vez pode falhar em algumas libc). */
-    const uint64_t BLOCO = 16ULL * 1024 * 1024; /* 16M arestas por bloco */
+    const uint64_t BLOCO = 16ULL * 1024 * 1024;
     uint64_t lidas = 0;
     while (lidas < n) {
         uint64_t querer = (n - lidas < BLOCO) ? (n - lidas) : BLOCO;
@@ -240,7 +209,6 @@ Aresta *ler_grafo_binario(const char *caminho, uint32_t *V, uint64_t *E)
         n = lidas;
     }
 
-    /* V = maior índice de vértice + 1 (não há cabeçalho). */
     uint32_t vmax = 0;
     for (uint64_t i = 0; i < n; i++) {
         if (arestas[i].u > vmax) vmax = arestas[i].u;
@@ -251,10 +219,6 @@ Aresta *ler_grafo_binario(const char *caminho, uint32_t *V, uint64_t *E)
     *E = n;
     return arestas;
 }
-
-/* ------------------------------------------------------------------------- *
- * Leitura BINÁRIA em STREAMING — ver descrição em grafo.h.
- * ------------------------------------------------------------------------- */
 
 FILE *grafo_bin_abrir(const char *caminho)
 {
@@ -268,7 +232,7 @@ uint64_t grafo_bin_ler_bloco(FILE *f, Aresta *buf, uint64_t cap)
 {
     if (f == NULL || buf == NULL || cap == 0)
         return 0;
-    /* Cada Aresta tem 16 bytes idênticos ao registro em disco: fread direto. */
+
     return (uint64_t) fread(buf, sizeof(Aresta), (size_t) cap, f);
 }
 
@@ -278,7 +242,6 @@ int grafo_bin_info(const char *caminho, uint32_t *V, uint64_t *E)
     if (f == NULL)
         return 0;
 
-    /* Buffer temporário de 1M arestas (16 MB) para o passe de varredura. */
     const uint64_t CAP = 1024ULL * 1024;
     Aresta *buf = (Aresta *) malloc((size_t) CAP * sizeof(Aresta));
     if (buf == NULL) {
@@ -307,45 +270,30 @@ int grafo_bin_info(const char *caminho, uint32_t *V, uint64_t *E)
 }
 
 #ifdef HAVE_MPI
-/* ===========================================================================
- * Implementação MPI-IO (compilada apenas com mpicc -DHAVE_MPI).
- *
- * Desvio "Estilo B / MPI-IO" autorizado: a leitura/distribuição é feita por
- * MPI-IO; cada rank lê só a SUA fatia de bytes do arquivo (escalável, sem o
- * rank 0 ler tudo e espalhar). D1: lista de arestas (não a matriz W(u,v)).
- * =========================================================================== */
+
 #include <mpi.h>
 
 Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
                         int rank, int nprocs, uint64_t *E_local,
                         uint64_t *byte_ini, uint64_t *byte_fim)
 {
-    /* Comprimento máximo de uma linha "u v peso" (3 uint32 = até ~33 chars);
-     * usamos folga. Serve de OVERLAP para completar a linha que cruza a borda. */
+
     const uint64_t MAX_LINHA = 128;
 
-    /* ----------------------------------------------------------------------
-     * 1) CABEÇALHO: só o rank 0 lê V, E e o offset onde começam as arestas.
-     *    Em seguida difunde os três valores a todos (MPI_Bcast).
-     * ---------------------------------------------------------------------- */
     uint32_t Vh = 0;
     uint64_t Eh = 0;
-    uint64_t data_start = 0; /* byte de início da 1ª aresta (começo da linha 3) */
+    uint64_t data_start = 0;
 
     if (rank == 0) {
         FILE *f = fopen(caminho, "r");
         if (f != NULL) {
             char linha[256];
-            /* lê as 2 primeiras linhas NÃO vazias: V e E */
+
             if (proxima_linha_nao_vazia(f, linha, sizeof linha))
                 sscanf(linha, "%" SCNu32, &Vh);
             if (proxima_linha_nao_vazia(f, linha, sizeof linha))
                 sscanf(linha, "%" SCNu64, &Eh);
-            /* Após ler as 2 linhas, a posição do arquivo é exatamente o início
-             * da linha 3 (1ª aresta). ftell dá esse offset em bytes.
-             * // VERIFICAR: assume quebras de linha '\n' (sem CRLF). O arquivo
-             *    de dados verificado usa LF; com CRLF o offset ainda seria
-             *    correto, pois ftell conta os bytes realmente consumidos. */
+
             long pos = ftell(f);
             data_start = (pos >= 0) ? (uint64_t) pos : 0;
             fclose(f);
@@ -354,19 +302,15 @@ Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
         }
     }
 
-    /* Difusão coletiva do cabeçalho (todos os ranks precisam de V e do offset). */
     MPI_Bcast(&Vh,         1, MPI_UINT32_T, 0, MPI_COMM_WORLD);
     MPI_Bcast(&Eh,         1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
     MPI_Bcast(&data_start, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
     if (Vh == 0)
-        return NULL; /* cabeçalho inválido em todos os ranks */
+        return NULL;
 
     *V = Vh;
     *E_total = Eh;
 
-    /* ----------------------------------------------------------------------
-     * 2) ABERTURA COLETIVA via MPI-IO e tamanho total do arquivo.
-     * ---------------------------------------------------------------------- */
     MPI_File fh;
     if (MPI_File_open(MPI_COMM_WORLD, caminho, MPI_MODE_RDONLY,
                       MPI_INFO_NULL, &fh) != MPI_SUCCESS) {
@@ -378,26 +322,10 @@ Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
     MPI_File_get_size(fh, &fsize_off);
     uint64_t fsize = (uint64_t) fsize_off;
 
-    /* ----------------------------------------------------------------------
-     * 3) PARTIÇÃO em 'nprocs' blocos contíguos da região de arestas
-     *    [data_start, fsize). Fronteiras nominais (tiling exato):
-     *        b(i) = data_start + (L * i) / nprocs
-     *    O rank i é dono das LINHAS cujo INÍCIO (offset do 1º byte) cai em
-     *    [b(i), b(i+1)). Assim cada linha pertence a exatamente um rank.
-     * ---------------------------------------------------------------------- */
     uint64_t L   = (fsize > data_start) ? (fsize - data_start) : 0;
     uint64_t bi  = data_start + (L * (uint64_t) rank)       / (uint64_t) nprocs;
     uint64_t bi1 = data_start + (L * (uint64_t) (rank + 1)) / (uint64_t) nprocs;
 
-    /* ALINHAMENTO DE BORDAS:
-     *  - Borda inicial: a linha que cruza b(i) pertence ao rank i-1. Para
-     *    decidir corretamente (inclusive quando b(i) cai EXATAMENTE no início
-     *    de uma linha), lemos 1 byte de "prefixo" antes de b(i): se esse byte
-     *    for '\n', então b(i) já é início de linha (não há nada a descartar);
-     *    senão, há uma linha parcial a descartar até o primeiro '\n'.
-     *  - Borda final: lemos MAX_LINHA bytes ALÉM de b(i+1) para conseguir
-     *    completar a última linha que começa antes de b(i+1) e cruza a borda.
-     * O rank 0 começa em data_start, que já é início de linha (linha 3). */
     int tem_prefixo = (rank != 0 && bi > data_start);
     uint64_t read_lo = tem_prefixo ? (bi - 1) : bi;
     uint64_t read_hi = bi1 + MAX_LINHA;
@@ -407,58 +335,38 @@ Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
     *byte_ini = read_lo;
     *byte_fim = read_hi;
 
-    /* Buffer da fatia (+1 para terminador nulo).
-     * LIMITAÇÃO (nbytes em int): o parâmetro 'count' de MPI_File_read_at_all é
-     * um int, logo a fatia de um rank deve caber em ~2 GB. Para o dataset deste
-     * trabalho (~70 MB) e qualquer nº razoável de ranks isso sempre vale. Para
-     * fatias > 2 GB seria preciso usar MPI_Count (MPI_File_read_at_all_c, MPI-4)
-     * ou ler em vários blocos de até INT_MAX bytes — não exigido nesta escala. */
     char *buf = (char *) malloc((size_t) nbytes + 1);
     if (buf == NULL) {
-        /* LIMITAÇÃO (alocação antes de coletiva): se UM rank falhasse aqui e
-         * retornasse antes do MPI_File_read_at_all (coletivo), os demais ficariam
-         * bloqueados. Nesta escala (fatia ~ dezenas de MB) assume-se que o malloc
-         * sempre tem sucesso; um tratamento robusto exigiria acordar a falha
-         * entre todos os ranks (ex.: MPI_Allreduce do código de erro) antes da
-         * coletiva. */
+
         MPI_File_close(&fh);
         return NULL;
     }
 
-    /* ----------------------------------------------------------------------
-     * 4) LEITURA COLETIVA da fatia de bytes. Todos os ranks participam
-     *    (read_at_all é coletiva); offsets/contagens podem diferir entre ranks.
-     * ---------------------------------------------------------------------- */
     MPI_Status st;
     MPI_File_read_at_all(fh, (MPI_Offset) read_lo, buf, (int) nbytes,
                          MPI_CHAR, &st);
     buf[nbytes] = '\0';
     MPI_File_close(&fh);
 
-    /* ----------------------------------------------------------------------
-     * 5) PARSING ALINHADO: percorre as linhas cujo INÍCIO cai em [b(i), b(i+1)).
-     * ---------------------------------------------------------------------- */
-    /* Define o índice (no buffer) da primeira linha que pertence a este rank. */
     uint64_t start_idx;
     if (rank == 0) {
-        start_idx = 0; /* data_start já é início de linha */
+        start_idx = 0;
     } else if (tem_prefixo) {
-        /* buf[0] é o byte em (b(i)-1). */
+
         if (buf[0] == '\n') {
-            start_idx = 1; /* b(i) é exatamente um início de linha */
+            start_idx = 1;
         } else {
-            /* há linha parcial (pertence ao rank i-1): pula até após o 1º '\n' */
+
             uint64_t k = 1;
             while (k < nbytes && buf[k] != '\n') k++;
             start_idx = (k < nbytes) ? (k + 1) : nbytes;
         }
     } else {
-        /* caso degenerado (bi == data_start em rank>0): trata como rank 0. */
+
         start_idx = 0;
     }
 
-    /* Vetor local de arestas com capacidade crescente. */
-    uint64_t cap = (nbytes / 16) + 16; /* estimativa: ~16 bytes por linha */
+    uint64_t cap = (nbytes / 16) + 16;
     Aresta *loc = (Aresta *) malloc((size_t) cap * sizeof(Aresta));
     if (loc == NULL) {
         free(buf);
@@ -470,15 +378,13 @@ Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
 
     uint64_t idx = start_idx;
     while (idx < nbytes) {
-        uint64_t abs_inicio = read_lo + idx; /* offset absoluto do início da linha */
+        uint64_t abs_inicio = read_lo + idx;
         if (abs_inicio >= bi1)
-            break; /* esta linha já pertence ao próximo rank */
+            break;
 
-        /* Delimita a linha [idx, j): vai até '\n' ou fim do buffer. A linha que
-         * cruza b(i+1) cabe inteira graças ao OVERLAP (MAX_LINHA). */
         uint64_t j = idx;
         while (j < nbytes && buf[j] != '\n') j++;
-        if (j < nbytes) buf[j] = '\0'; /* termina a string da linha */
+        if (j < nbytes) buf[j] = '\0';
 
         uint32_t u, v, w;
         if (sscanf(buf + idx, "%" SCNu32 " %" SCNu32 " %" SCNu32, &u, &v, &w) == 3
@@ -494,10 +400,10 @@ Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
             loc[n].peso = w;
             n++;
         } else {
-            ignoradas++; /* linha em branco/mal-formada (ex.: a linha vazia final) */
+            ignoradas++;
         }
 
-        idx = j + 1; /* avança para a próxima linha (após o '\n') */
+        idx = j + 1;
     }
 
     free(buf);
@@ -510,31 +416,16 @@ Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
     return loc;
 }
 
-/* ===========================================================================
- * ler_grafo_binario_mpiio — leitor BINÁRIO via MPI-IO (Estilo B).
- *
- * Como cada registro tem 16 bytes FIXOS, a partição é aritmética exata e NÃO
- * exige alinhamento de bordas de linha (ao contrário do leitor texto). O rank i
- * lê os registros [i*E/np, (i+1)*E/np) com MPI_File_read_at_all e reinterpreta
- * os bytes diretamente como vetor de Aresta (mesmo layout de 16 bytes).
- *
- * Sem cabeçalho: E_total = tamanho/16; V = MPI_Allreduce(MAX) do maior índice
- * de vértice local + 1.
- * =========================================================================== */
 Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
                                 int rank, int nprocs, uint64_t *E_local,
                                 uint64_t *rec_ini, uint64_t *rec_fim)
 {
-    const uint64_t REC = sizeof(Aresta); /* 16 bytes por aresta */
+    const uint64_t REC = sizeof(Aresta);
 
-    /* Tipo MPI de um registro: 16 bytes contíguos. Usar um tipo de 16 bytes
-     * (em vez de MPI_CHAR com count em bytes) mantém o 'count' pequeno e evita
-     * estourar o int de count quando a fatia passa de 2 GB. */
     MPI_Datatype TIPO_REC;
     MPI_Type_contiguous((int) REC, MPI_BYTE, &TIPO_REC);
     MPI_Type_commit(&TIPO_REC);
 
-    /* Abertura coletiva e tamanho do arquivo. */
     MPI_File fh;
     if (MPI_File_open(MPI_COMM_WORLD, caminho, MPI_MODE_RDONLY,
                       MPI_INFO_NULL, &fh) != MPI_SUCCESS) {
@@ -554,14 +445,12 @@ Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_to
     uint64_t E = fsize / REC;
     *E_total = E;
 
-    /* Partição em registros (divisão exata por offset). */
     uint64_t r_ini = (E * (uint64_t) rank)       / (uint64_t) nprocs;
     uint64_t r_fim = (E * (uint64_t) (rank + 1)) / (uint64_t) nprocs;
     uint64_t nrec  = (r_fim > r_ini) ? (r_fim - r_ini) : 0;
     *rec_ini = r_ini;
     *rec_fim = r_fim;
 
-    /* Buffer local = vetor de Aresta (layout idêntico ao disco). */
     Aresta *loc = (Aresta *) malloc((size_t) nrec * sizeof(Aresta));
     if (loc == NULL && nrec > 0) {
         fprintf(stderr, "[rank %d] ler_grafo_binario_mpiio: malloc de %" PRIu64
@@ -572,15 +461,12 @@ Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_to
         return NULL;
     }
 
-    /* Leitura coletiva da fatia: offset em BYTES, count em REGISTROS.
-     * 'nrec' <= E (<= ~800M) cabe folgado em int. */
     MPI_Status stt;
     MPI_File_read_at_all(fh, (MPI_Offset) (r_ini * REC), loc, (int) nrec,
                          TIPO_REC, &stt);
     MPI_File_close(&fh);
     MPI_Type_free(&TIPO_REC);
 
-    /* V global = maior índice de vértice + 1 (Allreduce MAX). */
     uint32_t vmax_local = 0;
     for (uint64_t i = 0; i < nrec; i++) {
         if (loc[i].u > vmax_local) vmax_local = loc[i].u;
@@ -598,42 +484,18 @@ Aresta *ler_grafo_binario_mpiio(const char *caminho, uint32_t *V, uint64_t *E_to
     return loc;
 }
 
-/* ===========================================================================
- * ler_grafo_binario_dist — leitor BINÁRIO sem armazenamento compartilhado.
- *
- * MOTIVAÇÃO: ler_grafo_binario_mpiio usa MPI_File_open(MPI_COMM_WORLD, ...),
- * que exige o arquivo ACESSÍVEL POR TODOS os ranks (mesmo disco local em cada
- * máquina, ou um sistema de arquivos compartilhado como NFS). Quando o
- * graph.bin existe em UMA ÚNICA máquina e não há NFS (nem permissão de sudo
- * para montá-lo), aquela abertura coletiva falha nos demais nós.
- *
- * ESTRATÉGIA: apenas o rank 0 (na máquina que tem o arquivo) abre e lê; cada
- * rank recebe pela REDE (MPI_Send/Recv) exatamente a fatia que leria no esquema
- * coletivo. A PARTIÇÃO é a MESMA aritmética [i*E/np, (i+1)*E/np), logo cada rank
- * fica com as mesmas arestas de antes — o algoritmo de Borůvka e o resultado
- * (peso total) são preservados bit a bit; muda só o TRANSPORTE dos dados.
- *
- * EFICIÊNCIA / ESCALA: o rank 0 NÃO carrega o arquivo inteiro. Lê em blocos de
- * CHUNK arestas e os envia, mantendo memória O(CHUNK) no transporte; cada rank
- * (inclusive o 0) guarda apenas a SUA fatia (E/np arestas), igual ao coletivo.
- * O custo extra é o rank 0 ler os 12,8 GB do disco local e enviá-los pela rede
- * (em vez de leitura paralela MPI-IO) — inevitável sem disco compartilhado.
- * =========================================================================== */
 Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_total,
                                int rank, int nprocs, uint64_t *E_local,
                                uint64_t *rec_ini, uint64_t *rec_fim)
 {
-    const uint64_t REC   = sizeof(Aresta);            /* 16 bytes por aresta */
-    const uint64_t CHUNK = 4ull * 1024 * 1024;        /* arestas/bloco (~64 MB) */
+    const uint64_t REC   = sizeof(Aresta);
+    const uint64_t CHUNK = 4ull * 1024 * 1024;
     const int      TAG   = 77;
 
-    /* Tipo MPI de 16 bytes: mantém o 'count' das mensagens em REGISTROS (cabe
-     * em int) mesmo quando a fatia ultrapassa 2 GB. */
     MPI_Datatype TIPO_REC;
     MPI_Type_contiguous((int) REC, MPI_BYTE, &TIPO_REC);
     MPI_Type_commit(&TIPO_REC);
 
-    /* 1) Só o rank 0 descobre E_total pelo tamanho do arquivo; difunde a todos. */
     uint64_t E = 0;
     FILE *f = NULL;
     if (rank == 0) {
@@ -659,7 +521,6 @@ Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_tot
     }
     *E_total = E;
 
-    /* 2) Partição IDÊNTICA à versão coletiva (preserva o algoritmo). */
     uint64_t r_ini = (E * (uint64_t) rank)       / (uint64_t) nprocs;
     uint64_t r_fim = (E * (uint64_t) (rank + 1)) / (uint64_t) nprocs;
     uint64_t nrec  = (r_fim > r_ini) ? (r_fim - r_ini) : 0;
@@ -676,16 +537,14 @@ Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_tot
         return NULL;
     }
 
-    /* 3) Transporte: rank 0 lê e envia; os demais recebem a SUA fatia. */
     if (rank == 0) {
-        /* Própria fatia (a primeira do arquivo) — leitura direta. */
+
         if (nrec > 0) {
             fseeko(f, (off_t) (r_ini * REC), SEEK_SET);
             if (fread(loc, REC, (size_t) nrec, f) != nrec)
                 fprintf(stderr, "[rank 0] ler_grafo_binario_dist: leitura curta da propria fatia.\n");
         }
-        /* Fatias dos demais ranks, em ordem crescente de offset (disco sequencial),
-         * cada uma fracionada em blocos de CHUNK arestas. */
+
         Aresta *tmp = (Aresta *) malloc((size_t) CHUNK * sizeof(Aresta));
         if (tmp == NULL) {
             fprintf(stderr, "[rank 0] ler_grafo_binario_dist: malloc do buffer de envio falhou.\n");
@@ -708,7 +567,7 @@ Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_tot
         free(tmp);
         fclose(f);
     } else {
-        /* Recebe a própria fatia, nos MESMOS blocos em que o rank 0 a enviou. */
+
         uint64_t rem = nrec, off = 0;
         while (rem > 0) {
             uint64_t blk = (rem < CHUNK) ? rem : CHUNK;
@@ -719,7 +578,6 @@ Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_tot
         }
     }
 
-    /* 4) V global = maior índice de vértice + 1 (Allreduce MAX) — idêntico ao coletivo. */
     uint32_t vmax_local = 0;
     for (uint64_t i = 0; i < nrec; i++) {
         if (loc[i].u > vmax_local) vmax_local = loc[i].u;
@@ -738,7 +596,7 @@ Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_tot
     return loc;
 }
 
-#else /* !HAVE_MPI — stub usado nos alvos compilados com gcc (teste/sequencial) */
+#else
 
 Aresta *ler_grafo_mpiio(const char *caminho, uint32_t *V, uint64_t *E_total,
                         int rank, int nprocs, uint64_t *E_local,
@@ -770,4 +628,4 @@ Aresta *ler_grafo_binario_dist(const char *caminho, uint32_t *V, uint64_t *E_tot
     return NULL;
 }
 
-#endif /* HAVE_MPI */
+#endif

@@ -26,3 +26,8 @@ output.txt
 # Pacotes/artefatos de setup
 *.tar.gz
 caracteristicas_setup_cod_paralelo
+CLAUDE.md
+/midia/ALGORITMO_REFERENCIA.md
+/midia/arvore_geradora_minima.pdf
+/midia/caracteristicas_dados_entrada_sequencial
+ALGORITMO_REFERENCIA.md
