@@ -31,3 +31,12 @@ CLAUDE.md
 /midia/arvore_geradora_minima.pdf
 /midia/caracteristicas_dados_entrada_sequencial
 ALGORITMO_REFERENCIA.md
+
+# Testes (nao versionar: nucleo do projeto e so o sequencial + paralelo)
+teste_dsu.c
+
+# Referencias / documentos de apoio (nao versionar)
+ALGORTIMO_REFERENCIA.md
+
+# Backups locais dos fontes (nao versionar)
+backups/
