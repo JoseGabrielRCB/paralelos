@@ -235,7 +235,10 @@ int main(int argc, char **argv)
             if (!best[c].valido)
                 continue;
             uint32_t u = best[c].u, v = best[c].v;
-            if (dsu_union(&dsu, u, v)) {
+            /* [SOMA PARCIAL] passa best[c].peso: como o DSU e replicado e todos
+             * os ranks aplicam as MESMAS unioes na MESMA ordem, o vetor de pesos
+             * acumulados fica identico em todos os ranks. */
+            if (dsu_union(&dsu, u, v, best[c].peso)) {
                 mst[mst_n].u = u;
                 mst[mst_n].v = v;
                 mst[mst_n].peso = best[c].peso;
@@ -267,6 +270,14 @@ int main(int argc, char **argv)
     if (ncomp > 1)
         d3_floresta = 1;
 
+    /* [SOMA PARCIAL] peso total lido do DSU replicado (soma das raizes). Como o
+     * DSU e identico em todos os ranks, qualquer rank chega no mesmo valor; usa
+     * de verificacao cruzada contra o 'soma' incremental. */
+    double soma_parcial_dsu = 0.0;
+    for (uint32_t i = 0; i < V; i++)
+        if (dsu_find(&dsu, i) == i)
+            soma_parcial_dsu += dsu.peso[i];
+
     /* fim: barreira e calculo de TOTAL e SO-calculo */
     MPI_Barrier(MPI_COMM_WORLD);
     double t_fim   = MPI_Wtime();
@@ -296,6 +307,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "Fases de Boruvka...: %" PRIu32 "\n", fase);
         fprintf(stderr, "Arestas na floresta: %" PRIu64 "\n", mst_n);
         fprintf(stderr, "Componentes finais.: %" PRIu32 "\n", ncomp);
+        /* [SOMA PARCIAL] peso total lido do DSU + checagem de consistencia. */
+        fprintf(stderr, "Soma parcial (DSU).: %.10g%s\n", soma_parcial_dsu,
+                (soma_parcial_dsu == soma) ? " (confere com o soma)"
+                                           : " (DIVERGE do soma!)");
         fprintf(stderr, "Arestas/caminho em.: %s\n", saida);
         fprintf(stderr, "Tempo TOTAL........: %.6f s (inclui I/O)\n", t_total);
         fprintf(stderr, "Tempo SO calculo...: %.6f s (exclui I/O)\n", t_calc);

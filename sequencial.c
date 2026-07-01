@@ -218,7 +218,9 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
             uint64_t fusoes = 0;
             for (uint32_t c = 0; c < V; c++) {
                 if (!best[c].valido) continue;
-                if (dsu_union(dsu, best[c].u, best[c].v)) {
+                /* [SOMA PARCIAL] passa best[c].peso: o DSU acumula o peso do
+                 * componente resultante (peso dos dois lados + esta aresta). */
+                if (dsu_union(dsu, best[c].u, best[c].v, best[c].peso)) {
                     mst[mst_n].u = best[c].u;
                     mst[mst_n].v = best[c].v;
                     mst[mst_n].peso = best[c].peso;
@@ -406,7 +408,9 @@ int main(int argc, char **argv)
                     if (menor[c] == ARESTA_NENHUMA)
                         continue;
                     Aresta e = arestas[menor[c]];
-                    if (dsu_union(&dsu, e.u, e.v)) {
+                    /* [SOMA PARCIAL] passa e.peso: o DSU acumula o peso do
+                     * componente resultante (peso dos dois lados + esta aresta). */
+                    if (dsu_union(&dsu, e.u, e.v, e.peso)) {
                         mst[mst_n++] = e;
                         soma += e.peso;
                         fusoes++;
@@ -429,6 +433,14 @@ int main(int argc, char **argv)
 
     uint32_t n_comp = dsu_num_componentes(&dsu);
 
+    /* [SOMA PARCIAL] o peso total da MST tambem pode ser lido direto do DSU:
+     * e a soma dos pesos acumulados de cada componente (cada raiz). Serve de
+     * verificacao cruzada contra o 'soma' incremental (devem ser iguais). */
+    double soma_parcial_dsu = 0.0;
+    for (uint32_t i = 0; i < V; i++)
+        if (dsu_find(&dsu, i) == i)
+            soma_parcial_dsu += dsu.peso[i];
+
     /* ===== 3) saida ===== */
     printf("Peso total da MST: %.10g\n", soma);
 
@@ -449,6 +461,10 @@ int main(int argc, char **argv)
     fprintf(stderr, "Fases de Boruvka...: %" PRIu32 "\n", fases);
     fprintf(stderr, "Arestas na floresta: %" PRIu64 "\n", mst_n);
     fprintf(stderr, "Componentes finais.: %" PRIu32 "\n", n_comp);
+    /* [SOMA PARCIAL] peso total lido do DSU + checagem de consistencia. */
+    fprintf(stderr, "Soma parcial (DSU).: %.10g%s\n", soma_parcial_dsu,
+            (soma_parcial_dsu == soma) ? " (confere com o soma)"
+                                       : " (DIVERGE do soma!)");
     fprintf(stderr, "Arestas gravadas em: %s\n", saida);
     fprintf(stderr, "Tempo de I/O.......: %.6f s\n", tempo_io);
     fprintf(stderr, "Tempo de calculo...: %.6f s\n", tempo_calc);

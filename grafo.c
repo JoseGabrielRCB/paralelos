@@ -18,11 +18,15 @@ int dsu_init(DSU *dsu, uint32_t n)
 
     dsu->pai  = (uint32_t *) malloc((size_t) n * sizeof(uint32_t));
     dsu->rank = (uint32_t *) calloc((size_t) n, sizeof(uint32_t));
-    if (dsu->pai == NULL || dsu->rank == NULL) {
+    /* [SOMA PARCIAL] calloc -> todo componente comeca com peso 0.0 (singleton). */
+    dsu->peso = (double *)   calloc((size_t) n, sizeof(double));
+    if (dsu->pai == NULL || dsu->rank == NULL || dsu->peso == NULL) {
         free(dsu->pai);
         free(dsu->rank);
+        free(dsu->peso);
         dsu->pai = NULL;
         dsu->rank = NULL;
+        dsu->peso = NULL;
         dsu->n = 0;
         return 0;
     }
@@ -40,8 +44,10 @@ void dsu_free(DSU *dsu)
         return;
     free(dsu->pai);
     free(dsu->rank);
+    free(dsu->peso);            /* [SOMA PARCIAL] libera o vetor de pesos */
     dsu->pai = NULL;
     dsu->rank = NULL;
+    dsu->peso = NULL;           /* [SOMA PARCIAL] */
     dsu->n = 0;
 }
 
@@ -61,7 +67,7 @@ uint32_t dsu_find(DSU *dsu, uint32_t x)
     return raiz;
 }
 
-int dsu_union(DSU *dsu, uint32_t a, uint32_t b)
+int dsu_union(DSU *dsu, uint32_t a, uint32_t b, double peso_aresta)
 {
     uint32_t ra = dsu_find(dsu, a);
     uint32_t rb = dsu_find(dsu, b);
@@ -69,16 +75,30 @@ int dsu_union(DSU *dsu, uint32_t a, uint32_t b)
     if (ra == rb)
         return 0;
 
+    /* [SOMA PARCIAL] soma parcial do componente resultante: os dois lados mais a
+     * aresta que os une. Calculada antes de decidir a raiz porque independe de
+     * quem fica como raiz; depois e gravada na raiz vencedora. */
+    double soma_comp = dsu->peso[ra] + dsu->peso[rb] + peso_aresta;
+
     /* Union by rank: pendura a arvore mais baixa sob a mais alta. */
     if (dsu->rank[ra] < dsu->rank[rb]) {
         dsu->pai[ra] = rb;
+        dsu->peso[rb] = soma_comp;   /* [SOMA PARCIAL] rb virou a raiz */
     } else if (dsu->rank[ra] > dsu->rank[rb]) {
         dsu->pai[rb] = ra;
+        dsu->peso[ra] = soma_comp;   /* [SOMA PARCIAL] ra virou a raiz */
     } else {
         dsu->pai[rb] = ra;
         dsu->rank[ra]++;
+        dsu->peso[ra] = soma_comp;   /* [SOMA PARCIAL] ra virou a raiz */
     }
     return 1;
+}
+
+/* [SOMA PARCIAL] Peso acumulado do componente de 'x' (le sempre pela raiz). */
+double dsu_peso_componente(DSU *dsu, uint32_t x)
+{
+    return dsu->peso[dsu_find(dsu, x)];
 }
 
 uint32_t dsu_num_componentes(DSU *dsu)

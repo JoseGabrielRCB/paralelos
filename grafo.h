@@ -18,6 +18,10 @@ typedef struct Aresta {
 typedef struct DSU {
     uint32_t *pai;
     uint32_t *rank;
+    /* [SOMA PARCIAL] peso[r] = soma dos pesos das arestas da MST ja acumuladas
+     * DENTRO do componente cuja raiz e r. So e valido para indices que sao raiz
+     * (dsu_find(x)==x); componente recem-criado (singleton) tem peso 0. */
+    double   *peso;
     uint32_t  n;
 } DSU;
 
@@ -27,8 +31,14 @@ void dsu_free(DSU *dsu);
 
 uint32_t dsu_find(DSU *dsu, uint32_t x);
 
-/* Retorna 1 se fundiu, 0 se ja estavam na mesma componente (evita ciclo). */
-int dsu_union(DSU *dsu, uint32_t a, uint32_t b);
+/* Retorna 1 se fundiu, 0 se ja estavam na mesma componente (evita ciclo).
+ * [SOMA PARCIAL] Ganhou o parametro 'peso_aresta': ao fundir, a soma do novo
+ * componente vira peso[ra] + peso[rb] + peso_aresta (soma dos dois lados mais a
+ * aresta que os une). Se nao fundir (mesmo componente), nada e somado. */
+int dsu_union(DSU *dsu, uint32_t a, uint32_t b, double peso_aresta);
+
+/* [SOMA PARCIAL] Peso acumulado do componente ao qual 'x' pertence. */
+double dsu_peso_componente(DSU *dsu, uint32_t x);
 
 uint32_t dsu_num_componentes(DSU *dsu);
 
