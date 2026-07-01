@@ -155,12 +155,17 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
         for (uint32_t c = 0; c < V; c++) best[c].valido = 0;
 
         if (in_ram) {
-            /* arestas vivas ja em RAM: varre so elas */
+            /* arestas vivas ja em RAM: varre so elas e COMPACTA (remove as que
+             * cairam na mesma componente) -> ram_n encolhe fase a fase. */
+            uint64_t w = 0;
             for (uint64_t i = 0; i < ram_n; i++) {
                 uint32_t cu = comp[ram[i].u], cv = comp[ram[i].v];
                 if (cu == cv) continue;
-                atualiza_best(best, cu, cv, ram[i].u, ram[i].v, ram[i].peso);
+                Aresta a = ram[i];
+                ram[w++] = a; /* sobrevivente (w <= i) */
+                atualiza_best(best, cu, cv, a.u, a.v, a.peso);
             }
+            ram_n = w;
             fprintf(stderr, "  fase %2" PRIu32 ": %" PRIu64 " arestas em RAM\n",
                     fases, ram_n);
         } else {
@@ -354,6 +359,7 @@ int main(int argc, char **argv)
             return 1;
         }
 
+        uint64_t e_viv = E; /* arestas ainda vivas; compacta a cada fase (E fica p/ log) */
         int concluido = 0;
         while (!concluido) {
             fases++;
@@ -365,18 +371,25 @@ int main(int argc, char **argv)
                 menor[i] = ARESTA_NENHUMA;
 
             /* para cada aresta entre componentes distintos, atualiza o menor
-             * dos componentes de u e de v */
-            for (uint64_t i = 0; i < E; i++) {
+             * dos componentes de u e de v.
+             * COMPACTACAO (= a do paralelo): aresta com cu==cv esta morta p/
+             * sempre; e removida do vetor (escrita em 'w'). menor[] guarda o
+             * indice JA compactado. Resultado identico (so descarta lixo). */
+            uint64_t w = 0;
+            for (uint64_t i = 0; i < e_viv; i++) {
                 uint32_t cu = comp[arestas[i].u];
                 uint32_t cv = comp[arestas[i].v];
                 if (cu == cv)
                     continue;
 
-                if (for_preferido_sobre(arestas, (uint32_t) i, menor[cu]))
-                    menor[cu] = (uint32_t) i;
-                if (for_preferido_sobre(arestas, (uint32_t) i, menor[cv]))
-                    menor[cv] = (uint32_t) i;
+                arestas[w] = arestas[i]; /* compacta in-place (w <= i) */
+                if (for_preferido_sobre(arestas, (uint32_t) w, menor[cu]))
+                    menor[cu] = (uint32_t) w;
+                if (for_preferido_sobre(arestas, (uint32_t) w, menor[cv]))
+                    menor[cv] = (uint32_t) w;
+                w++;
             }
+            e_viv = w; /* proximas fases so varrem as vivas */
 
             int algum = 0;
             for (uint32_t c = 0; c < V; c++) {
