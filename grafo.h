@@ -6,8 +6,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
-/* Aresta = 1 registro de 16 bytes casado bit a bit com o graph.bin
- * (u@0, v@4, peso@8; sem padding) -> leitura binaria e copia direta. */
+
 typedef struct Aresta {
     uint32_t u;
     uint32_t v;
@@ -18,9 +17,6 @@ typedef struct Aresta {
 typedef struct DSU {
     uint32_t *pai;
     uint32_t *rank;
-    /* [SOMA PARCIAL] peso[r] = soma dos pesos das arestas da MST ja acumuladas
-     * DENTRO do componente cuja raiz e r. So e valido para indices que sao raiz
-     * (dsu_find(x)==x); componente recem-criado (singleton) tem peso 0. */
     double   *peso;
     uint32_t  n;
 } DSU;
