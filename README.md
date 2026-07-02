@@ -3,8 +3,8 @@
 Algoritmo de **Árvore Geradora Mínima (AGM / MST)** de **Borůvka** em duas versões
 que dão **o mesmo peso total** para qualquer número de processos:
 
-- **`sequencial.c`** — roda numa máquina só (`gcc`).
-- **`paralelo.c`** — roda em várias máquinas via **MPI** (`mpicc`/`mpirun`).
+- **`joseGabriel_48936_sequencial.c`** — roda numa máquina só (`gcc`).
+- **`joseGabriel_48936_paralelo.c`** — roda em várias máquinas via **MPI** (`mpicc`/`mpirun`).
 
 Este README é focado em **como rodar** e **como usar o Makefile** (inclusive num
 cluster por SSH). No fim há um resumo de como o código funciona.
@@ -119,12 +119,12 @@ Numa máquina só, sem cluster:
 
 ```sh
 # compilar
-gcc   -O2 -Wall -o sequencial sequencial.c grafo.c
-mpicc -O2 -Wall -DHAVE_MPI -o paralelo   paralelo.c   grafo.c
+gcc   -O2 -Wall -o joseGabriel_48936_sequencial joseGabriel_48936_sequencial.c grafo.c
+mpicc -O2 -Wall -DHAVE_MPI -o joseGabriel_48936_paralelo   joseGabriel_48936_paralelo.c   grafo.c
 
 # rodar
-./sequencial <arquivo_dados> [arquivo_saida]
-mpirun -np <N> ./paralelo <arquivo_dados> [arquivo_saida]
+./joseGabriel_48936_sequencial <arquivo_dados> [arquivo_saida]
+mpirun -np <N> ./joseGabriel_48936_paralelo <arquivo_dados> [arquivo_saida]
 ```
 
 Para testar o paralelo com mais processos que núcleos na mesma máquina, use
@@ -157,10 +157,10 @@ leitura coletiva MPI-IO.
   dentro de cada componente (`peso[nova_raiz] = peso[A] + peso[B] + peso_da_aresta`)
   — a **soma parcial**. O peso total é a soma dos `peso[raiz]`, usada como
   verificação cruzada (linha `Soma parcial (DSU)`).
-- **`sequencial.c`** — Borůvka em uma máquina. Em cada fase acha a menor aresta de
+- **`joseGabriel_48936_sequencial.c`** — Borůvka em uma máquina. Em cada fase acha a menor aresta de
   saída de cada componente e aplica as uniões. Modo **em-RAM** (grafo inteiro em
   memória) ou **streaming** (relê o `.bin` em blocos) para arquivos gigantes.
-- **`paralelo.c`** — Borůvka com MPI no **Estilo B**: o DSU é **replicado** em todos
+- **`joseGabriel_48936_paralelo.c`** — Borůvka com MPI no **Estilo B**: o DSU é **replicado** em todos
   os ranks; cada rank varre só sua fatia de arestas, um `MPI_Allreduce` com `MPI_Op`
   customizada combina as melhores arestas, e todos aplicam as **mesmas uniões na
   mesma ordem**. Por isso o peso total independe do número de processos.

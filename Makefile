@@ -17,10 +17,10 @@ MAQUINAS    := l1m21u24 l1m22u24 l1m18u24 l1m14u24 l1m28u24 l1m30u24 l1m31u24
 # REMOTE_PATH = MESMO caminho em todas as maquinas (home e' local, nao compartilhado).
 REMOTE_PATH := /home/local/$(RGM)/paralelos
 
-parBIN      := paralelo
-parFONTE    := paralelo.c
-seqBIN      := sequencial
-seqFONTE    := sequencial.c
+parBIN      := joseGabriel_48936_paralelo
+parFONTE    := joseGabriel_48936_paralelo.c
+seqBIN      := joseGabriel_48936_sequencial
+seqFONTE    := joseGabriel_48936_sequencial.c
 testeBIN    := teste_dsu
 testeFONTE  := teste_dsu.c
 # COMUM = fonte compartilhado (DSU + I/O).

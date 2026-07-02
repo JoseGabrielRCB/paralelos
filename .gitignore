@@ -1,7 +1,7 @@
 # Executaveis (nao versionar)
 teste_dsu
-sequencial
-paralelo
+joseGabriel_48936_sequencial
+joseGabriel_48936_paralelo
 
 # Objetos
 *.o
