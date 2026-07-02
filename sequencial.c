@@ -116,9 +116,6 @@ static int boruvka_stream(const char *entrada, uint32_t V, uint64_t E, DSU *dsu,
         return 0;
     }
 
-    /* Otimizacao opt-in SEQ_RAM_EDGES=<n>: quando as arestas que ainda cruzam
-     * componentes couberem em 'ram', migra-as p/ RAM e para de reler o disco.
-     * Seguro: aresta interna a um componente nunca mais e util no Boruvka. */
     uint64_t cap = 0;
     {
         const char *env = getenv("SEQ_RAM_EDGES");
@@ -371,12 +368,6 @@ int main(int argc, char **argv)
 
             for (uint32_t i = 0; i < V; i++)
                 menor[i] = ARESTA_NENHUMA;
-
-            /* para cada aresta entre componentes distintos, atualiza o menor
-             * dos componentes de u e de v.
-             * COMPACTACAO (= a do paralelo): aresta com cu==cv esta morta p/
-             * sempre; e removida do vetor (escrita em 'w'). menor[] guarda o
-             * indice JA compactado. Resultado identico (so descarta lixo). */
             uint64_t w = 0;
             for (uint64_t i = 0; i < e_viv; i++) {
                 uint32_t cu = comp[arestas[i].u];
@@ -433,9 +424,7 @@ int main(int argc, char **argv)
 
     uint32_t n_comp = dsu_num_componentes(&dsu);
 
-    /* [SOMA PARCIAL] o peso total da MST tambem pode ser lido direto do DSU:
-     * e a soma dos pesos acumulados de cada componente (cada raiz). Serve de
-     * verificacao cruzada contra o 'soma' incremental (devem ser iguais). */
+   
     double soma_parcial_dsu = 0.0;
     for (uint32_t i = 0; i < V; i++)
         if (dsu_find(&dsu, i) == i)
