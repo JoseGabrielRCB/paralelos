@@ -27,10 +27,6 @@ void dsu_free(DSU *dsu);
 
 uint32_t dsu_find(DSU *dsu, uint32_t x);
 
-/* Retorna 1 se fundiu, 0 se ja estavam na mesma componente (evita ciclo).
- * [SOMA PARCIAL] Ganhou o parametro 'peso_aresta': ao fundir, a soma do novo
- * componente vira peso[ra] + peso[rb] + peso_aresta (soma dos dois lados mais a
- * aresta que os une). Se nao fundir (mesmo componente), nada e somado. */
 int dsu_union(DSU *dsu, uint32_t a, uint32_t b, double peso_aresta);
 
 /* [SOMA PARCIAL] Peso acumulado do componente ao qual 'x' pertence. */
