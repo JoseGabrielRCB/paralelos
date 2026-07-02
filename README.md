@@ -76,7 +76,7 @@ Gera o `hosts` (hostfile) a partir de `MAE` + `MAQUINAS` e chama:
 ```sh
 mpirun -np <NP> --hostfile hosts \
   --mca btl_tcp_if_include <IFACE> --mca oob_tcp_if_include <IFACE> \
-  ./paralelo <GRAFO> <SAIDA>
+  ./joseGabriel_48936_paralelo <GRAFO> <SAIDA>
 ```
 
 Fixar a `IFACE` nos dois canais (dados e controle) evita que o MPI tente usar
@@ -89,7 +89,7 @@ make run-seq                                  # usa GRAFO e SAIDA do Makefile
 make run-seq GRAFO=/tmp/graph.bin SAIDA=seq.txt
 ```
 
-Compila (se preciso) e roda `./sequencial <GRAFO> <SAIDA>`. Serve para **conferir**
+Compila (se preciso) e roda `./joseGabriel_48936_sequencial <GRAFO> <SAIDA>`. Serve para **conferir**
 que o paralelo dá o mesmo **peso total** que o sequencial.
 
 ---
